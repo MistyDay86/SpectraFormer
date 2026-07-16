@@ -1,32 +1,4 @@
-"""
-SpectraFormer training script.
-
-Usage:
-    1:
-    export CUDA_DIR=/opt/share/libs/intel/nvidia/cuda-12.8.0
-    export LD_LIBRARY_PATH=$VIRTUAL_ENV/lib/python3.11/site-packages/nvidia/cusparse/lib:/usr/lib64:/usr/lib
-    export LD_PRELOAD=$VIRTUAL_ENV/lib/python3.11/site-packages/nvidia/cusparse/lib/libcusparse.so.12:$CUDA_DIR/lib64/libnvJitLink.so.12
-    export XLA_FLAGS=--xla_gpu_cuda_data_dir=$CUDA_DIR
-    export XLA_FLAGS="--xla_gpu_compilation_cache_dir=/work/dpoteryayev/.xla_cache --xla_gpu_compilation_cache_capacity_bytes=2147483648"
-    export XLA_FLAGS="$XLA_FLAGS --xla_gpu_autotune_level=1"
-
-    python train_script_DynMask.py --model-tag min72_highf --material SiC-high-f --regime multi-gpu --no-stream-datasets --debug-logging --debug_log_every_batches 1
-
-
-    2:
-    export CUDA_DIR=/opt/share/libs/intel/nvidia/cuda-12.8.0
-    export LD_LIBRARY_PATH=$VIRTUAL_ENV/lib/python3.11/site-packages/nvidia/cusparse/lib:/usr/lib64:/usr/lib
-    export LD_PRELOAD=$VIRTUAL_ENV/lib/python3.11/site-packages/nvidia/cusparse/lib/libcusparse.so.12:$CUDA_DIR/lib64/libnvJitLink.so.12
-    export XLA_FLAGS="--xla_gpu_cuda_data_dir=$CUDA_DIR --xla_gpu_autotune_level=1"
-    export JAX_COMPILATION_CACHE_DIR=/work/dpoteryayev/.xla_cache
-    python train_script_DynMask.py   --model-tag min79_highf   --material SiC-high-f   --regime multi-gpu   --no-stream-datasets   --debug-logging   --debug-log-every-batches 1
-
-
-
-
-    python train_script_DynMask.py --model-tag min72_highf --material SiC-high-f
-    python train_script_DynMask.py --model-tag min72_highf --material SiC-high-f --regime multi-gpu --no-stream-datasets
-"""
+"""SpectraFormer GammaNLL training script."""
 
 import gc
 import logging
@@ -40,45 +12,26 @@ from typing import Literal
 import tyro
 from loguru import logger
 
-# Configure loguru
+
 logger.remove()
 logger.add(
     sys.stderr,
-    format="<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>",
+    format="{time:HH:mm:ss} | {level: <8} | {message}",
     level="INFO",
 )
 
+
 @dataclass
 class TrainArgs:
-    """Training configuration arguments."""
-
-    model_tag: str = "min70_highf"
-    """Model tag - must match configs/configs_{model_tag}.yaml"""
-
+    model_tag: str = "min70_highf_filelevel_gammanll"
     material: str = "SiC-high-f"
-    """Material/dataset directory name under data/parsed_data_spatial/"""
-
-    regime: Literal["single-gpu", "multi-gpu"] = "multi-gpu"
-    """Training regime: single-gpu or multi-gpu (uses all available devices)"""
-
+    regime: Literal["single-gpu", "multi-gpu"] = "single-gpu"
     debug_nans: bool = True
-    """Enable JAX NaN debugging (slower but catches numerical issues)"""
-
     debug_logging: bool = False
-    """Enable verbose debug logging"""
-
     debug_compile_logging: bool = False
-    """Enable JAX compile logging (short debug runs only)"""
-
-    debug_log_every_batches: int = 1
-    """Log every N batches when debug logging is enabled"""
-
-    stream_datasets: bool = False
-    """Load datasets one at a time instead of preloading all"""
 
 
 def main(args: TrainArgs) -> None:
-    """Run training with the given arguments."""
     class _InterceptHandler(logging.Handler):
         def emit(self, record: logging.LogRecord) -> None:
             try:
@@ -89,20 +42,23 @@ def main(args: TrainArgs) -> None:
 
     if args.debug_compile_logging:
         os.environ.setdefault("JAX_LOG_COMPILES", "1")
+
     logger.remove()
-    log_level = "DEBUG" if args.debug_logging else "INFO"
     logger.add(
         sys.stderr,
-        format="<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>",
-        level=log_level,
+        format="{time:HH:mm:ss} | {level: <8} | {message}",
+        level="DEBUG" if args.debug_logging else "INFO",
     )
+
+    Path("temp").mkdir(exist_ok=True)
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     logger.add(f"temp/{args.model_tag}_{timestamp}.log")
+
     if args.debug_compile_logging:
         logging.basicConfig(handlers=[_InterceptHandler()], level=logging.WARNING, force=True)
         logging.getLogger("jax").setLevel(logging.WARNING)
         logging.getLogger("jaxlib").setLevel(logging.WARNING)
-    import gpustat
+
     import jax
     import jax.numpy as jnp
     import ml_confs
@@ -110,236 +66,127 @@ def main(args: TrainArgs) -> None:
     import optax
     import orbax.checkpoint as ocp
     from flax.training.train_state import TrainState
-    from flax.training.early_stopping import EarlyStopping
     from tensorboardX import SummaryWriter
 
-    from spectraformer.model import CustomTrainState, SpectraFormer
     from spectraformer.input_pipeline import batch_sampler, dataset_loader
+    from spectraformer.inference import plot_loss, plot_results_train
+    from spectraformer.model import CustomTrainState, SpectraFormer
     from spectraformer.train_DynMask import (
-        train_epoch, validation_epoch,
-        train_epoch_pmap, validation_epoch_pmap,
-        log_gpu_usage,
-        warmup_compile_single,
-        warmup_compile_pmap,
-        warmup_lower_compile_pmap,
         _apply_mask_to_batch,
         _build_dynamic_mask_windows_np,
+        train_step,
+        validation_step,
     )
-    from spectraformer.inference import plot_results_train, predict, plot_loss
 
     jax.config.update("jax_debug_nans", args.debug_nans)
 
-    devices = jax.devices()
-    num_devices = len(devices)
-    logger.info(f"JAX devices: {devices} ({num_devices} total)")
-    if args.debug_logging:
-        logger.debug(
-            "Env: JAX_COMPILATION_CACHE_DIR={} XLA_FLAGS={}",
-            os.environ.get("JAX_COMPILATION_CACHE_DIR", ""),
-            os.environ.get("XLA_FLAGS", ""),
-        )
-        if args.debug_compile_logging:
-            logger.debug(
-                "Env: JAX_LOG_COMPILES={}",
-                os.environ.get("JAX_LOG_COMPILES", ""),
-            )
-        cache_dir = os.environ.get("JAX_COMPILATION_CACHE_DIR", "")
-        if cache_dir:
-            logger.debug(
-                "Cache dir exists={} writable={} path={}",
-                os.path.isdir(cache_dir),
-                os.access(cache_dir, os.W_OK),
-                cache_dir,
-            )
-
-    @jax.pmap
-    def update_epoch(state):
-        return state.replace(epoch=state.epoch + 1)
-
-    # Directories
     maindir = Path(__file__).parent.resolve()
     logdir = maindir / "logs"
     ckptdir = maindir / "checkpoints"
+    datadir = maindir / "data"
+    configsdir = maindir / "configs"
+    parsed_datadir = datadir / "parsed_data_spatial"
+    material_dir = parsed_datadir / args.material
+
     logdir.mkdir(parents=True, exist_ok=True)
     ckptdir.mkdir(parents=True, exist_ok=True)
 
-    datadir = maindir / "data"
-    configsdir = maindir / "configs"
-    configsdir.mkdir(parents=True, exist_ok=True)
-
-    # Map CLI regime to internal naming
-    training_regime = "All devices" if args.regime == "multi-gpu" else "One device"
-
-    # Load config
     config_file_path = configsdir / f"configs_{args.model_tag}.yaml"
     if not config_file_path.exists():
         raise FileNotFoundError(f"Config file not found: {config_file_path}")
 
-    parsed_datadir = datadir / "parsed_data_spatial"
-    material_dir = parsed_datadir / args.material
-    nc_files = list(material_dir.rglob("*.nc"))
+    configs = ml_confs.from_file(config_file_path)
+    configs.tabulate()
+
+    devices = jax.devices()
+    logger.info(f"JAX devices: {devices} ({len(devices)} total)")
+
+    nc_files = sorted(material_dir.rglob("*.nc"))
     if not nc_files:
         raise ValueError(f"No .nc files found in {material_dir}")
 
-    configs = ml_confs.from_file(config_file_path)
-    stream_datasets = args.stream_datasets
-    configs.tabulate()
-    is_early_stop = True if not hasattr(configs, 'is_early_stop') else configs.is_early_stop # turning on early stopping process
-    min_delta = 1e-4 if not hasattr(configs, 'early_stop_min_delta') else configs.early_stop_min_delta
-    patience = 5 if not hasattr(configs, 'early_stop_patience') else configs.early_stop_patience
-    is_masked_loss = False if not hasattr(configs, 'is_masked_loss') else configs.is_masked_loss
-    
-    if training_regime=="All devices" and configs.batch_size % num_devices !=0:
-        raise Exception(f"Sharding requires batch size divisibility by the number of devices. Change it accordingly (preferably to 24).")
-    
-    # This is an implementation of learning rate schedule - multiple cosine decay cycles from init_value to init_value*alpha, then repeating from init_value.  
-    cosine_kwargs = []
-    
-    init_value = 0.1*configs.learning_rate if not hasattr(configs, 'warmup_coeff') else configs.warmup_coeff*configs.learning_rate
-    peak_value = configs.learning_rate
-    warmup_steps = 1000 if not hasattr(configs, 'warmup_steps') else configs.warmup_steps
-    decay_steps = 2000 if not hasattr(configs, 'decay_steps') else configs.decay_steps
-    decline_coeff = 1 if not hasattr(configs, 'decline_coeff') else configs.decline_coeff
-    
-    for i in range(20 if not hasattr(configs, 'num_cycles') else configs.num_cycles):
-        end_value = decline_coeff * init_value
-        # 20 cycles - arbitrary large number to ensure enough cycles
-        cycle_dict = {
-            "init_value": init_value, 
-            "peak_value": peak_value, 
-            "warmup_steps": warmup_steps,
-            "decay_steps": decay_steps,            
-            "end_value": end_value
-        }
-        cosine_kwargs.append(cycle_dict)
-        init_value = end_value
-        peak_value *= decline_coeff
-    
-    #                           LR schedule graph
-    #
-    # - - - - - - - - - - - - - - - ___* ___________ - - - - - - - - - - - - - - - - - - - - - - - - > configs.learning_rate (without a schedule it is constant)
-    #|                     _______*/   |            \*___                |                         ^
-    #|            _______*/            |                 \*___           |                         |
-    #|  _______*/                      |                      \*         |                         v
-    #|*/                               |                        \________* - - - - - - - - - - - - - > 
-    #|                                 |                                 |
-    #|           warmup_steps          |                                 |
-    #|<------------------------------->|                                 |--------------------------->
-    #|       Linear warm-up from       |                                 |
-    #|          init_value to          |                                 | Repeat the cycle 100 times
-    #|            peak_value           |    decay_steps - warmup_steps   |
-    #|                                 |<------------------------------->|
-    #|                                 |        Cosine decay from        |
-    #|                                 |          peak_value to          |
-    #|                                 |            end_value            |
-    #|                           decay_steps                             |
-    #|<----------------------------------------------------------------->|
-    
-    learning_rate_decay = getattr(configs, 'learning_rate_decay', 'Constant')
-    match learning_rate_decay:
-        case "Multiple cosine decay cycles":
-            learning_rate_fn = optax.schedules.sgdr_schedule(cosine_kwargs=cosine_kwargs)
-            tx = optax.adam(learning_rate=learning_rate_fn)
-        case "Constant":
-            tx = optax.adam(learning_rate=configs.learning_rate)
-        case _:
-            raise Exception(f"You didn't specify a learning rate schedule!")
-    
-    # New automatic dataset loading (streamed per dataset)
-    is_filter = getattr(configs, 'is_filter', False)
-    dataset_specs = [(nc_file, False) for nc_file in nc_files]
-    if is_filter:
-        dataset_specs += [(nc_file, True) for nc_file in nc_files]
-        logger.info("Filtering enabled: doubling data")
+    file_validation_fraction = float(getattr(configs, "file_validation_fraction", 0.20))
+    file_split_seed = int(getattr(configs, "file_split_seed", getattr(configs, "root_rng_seed", 0)))
 
-    logger.info(f"Found {len(dataset_specs)}/{len(nc_files)} dataset entries from {material_dir}")
-    if args.debug_logging:
-        logger.debug(
-            "Dataset loading mode: stream_datasets={} entries={}",
-            stream_datasets,
-            len(dataset_specs),
-        )
+    rng = np.random.default_rng(file_split_seed)
+    indices = rng.permutation(len(nc_files))
+    n_val = max(1, int(round(len(nc_files) * file_validation_fraction)))
+    n_val = min(n_val, len(nc_files) - 1)
+    val_idx = set(indices[:n_val].tolist())
 
-    def load_dataset_for_file(nc_file, use_filter: bool):
+    train_files = [f for i, f in enumerate(nc_files) if i not in val_idx]
+    val_files = [f for i, f in enumerate(nc_files) if i in val_idx]
+
+    logger.info(f"Found {len(nc_files)} maps in {material_dir}")
+    logger.info(f"Train maps: {len(train_files)}")
+    logger.info(f"Validation maps: {len(val_files)}")
+    logger.info("Validation map list:")
+    for f in val_files:
+        logger.info(f"  - {f.relative_to(material_dir)}")
+
+    is_filter = bool(getattr(configs, "is_filter", False))
+    filter_options = [False, True] if is_filter else [False]
+
+    def load_full_map(nc_file: Path, use_filter: bool, split_fraction: float):
         relative_path = nc_file.relative_to(parsed_datadir)
-        return dataset_loader(
+        train_ds, val_ds = dataset_loader(
             datadir=parsed_datadir,
             file_location_with_name=str(relative_path),
-            shuffle_rng_seed=configs.root_rng_seed,
+            shuffle_rng_seed=getattr(configs, "root_rng_seed", 0),
+            split_fraction=split_fraction,
             is_filter=use_filter,
-            option='whitaker_hayes'
+            option="whitaker_hayes",
         )
-    
-    
-    mask_windows = list(
-        zip(configs.masked_interval_starts, configs.masked_interval_ends)
-    )
-    
-    datasets = []
-    dummy_example = None
-    if stream_datasets:
-        for nc_file, use_filter in dataset_specs:
-            if args.debug_logging:
-                load_start = time.perf_counter()
-            train_ds, val_ds = load_dataset_for_file(nc_file, use_filter)
-            if args.debug_logging:
-                logger.debug(
-                    "Loaded dataset {} (filter={}) in {:.3f}s",
-                    nc_file.name,
-                    use_filter,
-                    time.perf_counter() - load_start,
-                )
-            if train_ds.sizes['spectra'] >= configs.batch_size:
-                dummy_example = next(batch_sampler(train_ds, mask_windows, batch_size=1))
-                del train_ds, val_ds
-                gc.collect()
-                break
-            del train_ds, val_ds
-            gc.collect()
-    else:
-        if args.debug_logging:
-            preload_start = time.perf_counter()
-        for nc_file, use_filter in dataset_specs:
-            if args.debug_logging:
-                load_start = time.perf_counter()
-            train_ds, val_ds = load_dataset_for_file(nc_file, use_filter)
-            if args.debug_logging:
-                logger.debug(
-                    "Loaded dataset {} (filter={}) in {:.3f}s",
-                    nc_file.name,
-                    use_filter,
-                    time.perf_counter() - load_start,
-                )
-            if train_ds.sizes['spectra'] >= configs.batch_size and val_ds.sizes['spectra'] >= configs.batch_size:
-                datasets.append((train_ds, val_ds, nc_file.name, use_filter))
-                if dummy_example is None:
-                    dummy_example = next(batch_sampler(train_ds, mask_windows, batch_size=1))
-            else:
-                del train_ds, val_ds
-        logger.info(f"Preloaded {len(datasets)} datasets into memory")
-        if args.debug_logging:
-            logger.debug(
-                "Preload completed in {:.3f}s",
-                time.perf_counter() - preload_start,
-            )
+        return train_ds if split_fraction == 1.0 else val_ds
 
-    if dummy_example is None:
-        raise ValueError("No dataset has enough spectra for the current batch size.")
-    dummy_wave_number = jnp.squeeze(dummy_example["wave_number"])
-    
+    train_parts = []
+    val_parts = []
+
+    for nc_file in train_files:
+        for use_filter in filter_options:
+            ds = load_full_map(nc_file, use_filter, 1.0)
+            if ds.sizes["spectra"] >= configs.batch_size:
+                train_parts.append((nc_file.name, use_filter, ds))
+            else:
+                logger.warning(f"Skipping train map {nc_file.name}: {ds.sizes['spectra']} spectra")
+
+    for nc_file in val_files:
+        for use_filter in filter_options:
+            ds = load_full_map(nc_file, use_filter, 0.0)
+            if ds.sizes["spectra"] >= configs.batch_size:
+                val_parts.append((nc_file.name, use_filter, ds))
+            else:
+                logger.warning(f"Skipping validation map {nc_file.name}: {ds.sizes['spectra']} spectra")
+
+    if not train_parts:
+        raise ValueError("No train map has enough spectra for the current batch size.")
+    if not val_parts:
+        raise ValueError("No validation map has enough spectra for the current batch size.")
+
+    train_spectra = sum(ds.sizes["spectra"] for _, _, ds in train_parts)
+    val_spectra = sum(ds.sizes["spectra"] for _, _, ds in val_parts)
+    logger.info(f"Usable train maps: {len(train_parts)}")
+    logger.info(f"Usable validation maps: {len(val_parts)}")
+    logger.info(f"Train spectra: {train_spectra}")
+    logger.info(f"Validation spectra: {val_spectra}")
+
+    mask_windows_static = list(zip(configs.masked_interval_starts, configs.masked_interval_ends))
+    mask_windows_for_loader = [] if getattr(configs, "dynamic_mask", False) else mask_windows_static
+
+    dummy_ds = train_parts[0][2]
+    dummy_example = next(batch_sampler(dummy_ds, mask_windows_for_loader, batch_size=1, shuffle=False))
+
     model = SpectraFormer(
         num_heads=configs.num_heads,
         num_layers=configs.num_layers,
         embedding_dim=configs.embedding_dim,
-        dropout_rate=configs.dropout_rate
+        dropout_rate=configs.dropout_rate,
     )
-    
-    # RNG Keys
+
     root_key = jax.random.PRNGKey(seed=configs.root_rng_seed)
-    main_key, params_key, dropout_key = jax.random.split(key=root_key, num=3)
-    window_RNG_key = jax.random.split(main_key, num=1)[0]
-    
-    # Model Initialization
+    main_key, params_key, dropout_key = jax.random.split(root_key, 3)
+    window_key = main_key
+
     variables = model.init(
         params_key,
         dummy_example["masked_spectra"][0],
@@ -347,90 +194,83 @@ def main(args: TrainArgs) -> None:
         dummy_example["mask"],
         training=True,
     )
-    
+
+    learning_rate_decay = getattr(configs, "learning_rate_decay", "Constant")
+    if learning_rate_decay == "Constant":
+        tx = optax.adam(learning_rate=configs.learning_rate)
+    elif learning_rate_decay == "Multiple cosine decay cycles":
+        cosine_kwargs = []
+        init_value = getattr(configs, "warmup_coeff", 0.1) * configs.learning_rate
+        peak_value = configs.learning_rate
+        warmup_steps = getattr(configs, "warmup_steps", 1000)
+        decay_steps = getattr(configs, "decay_steps", 2000)
+        decline_coeff = getattr(configs, "decline_coeff", 1)
+        for _ in range(getattr(configs, "num_cycles", 20)):
+            end_value = decline_coeff * init_value
+            cosine_kwargs.append(
+                {
+                    "init_value": init_value,
+                    "peak_value": peak_value,
+                    "warmup_steps": warmup_steps,
+                    "decay_steps": decay_steps,
+                    "end_value": end_value,
+                }
+            )
+            init_value = end_value
+            peak_value *= decline_coeff
+        tx = optax.adam(learning_rate=optax.schedules.sgdr_schedule(cosine_kwargs=cosine_kwargs))
+    else:
+        raise ValueError(f"Unsupported learning_rate_decay: {learning_rate_decay}")
+
     state = CustomTrainState.create(
         apply_fn=model.apply,
         params=variables["params"],
         tx=tx,
         epoch=jnp.array(0, dtype=jnp.int32),
     )
-    
-    # Checkpointing: load from checkpoint and resume training if available
+
     ckpt_options = ocp.CheckpointManagerOptions(
-        #----------------------------------------------------------------------------------------------------#
-        max_to_keep=patience+1, # this is for having best model in case of training process only worsens the loss
+        max_to_keep=int(getattr(configs, "checkpoint_max_to_keep", 1)),
         enable_async_checkpointing=False,
-        #----------------------------------------------------------------------------------------------------#
-        )
-    
-    if not (ckptdir / configs.tag).exists():
-        (ckptdir / configs.tag).mkdir()
-        (ckptdir / configs.tag / ".tmp").touch()
-    
+    )
+    ckpt_path = ckptdir / configs.tag
+    ckpt_path.mkdir(parents=True, exist_ok=True)
     ckpt_manager = ocp.CheckpointManager(
-        ckptdir / configs.tag,
+        ckpt_path,
         options=ckpt_options,
         metadata=configs.to_dict(),
     )
-    
-    # After initialization remove the dummy file
-    if (ckptdir / configs.tag / ".tmp").exists():
-        (ckptdir / configs.tag / ".tmp").unlink()
-    
+
     if len(ckpt_manager.all_steps()) > 0:
         state = ckpt_manager.restore(
             ckpt_manager.latest_step(),
-            args=ocp.args.StandardRestore(state)
+            args=ocp.args.StandardRestore(state),
         )
         logger.info(f"Resuming from epoch {state.epoch}, step {state.step}")
     else:
         logger.info(f"No checkpoint found for '{configs.tag}', training from scratch")
 
-    restored_epoch = state.epoch
-    
     metric_writer = SummaryWriter(logdir / configs.tag)
-    rng_streams = {"dropout": dropout_key}
-    mean_streams = {"mean": "Not specified" if not hasattr(configs, 'mean') else configs.mean}
-    
-    # Early stopping initialization
-    early_stop = EarlyStopping(min_delta=min_delta, patience=patience)
-    
-    train_metrics = []
-    val_metrics = []
-    
-    # This is for drawing on TensorBoard both train and validation losses on a single graph
-    layout = {
-        "my_layout": {
-            "loss_step": ["Multiline", ["train/train_loss_step", "val/val_loss_step"]],
-            "loss_epoch": ["Multiline", ["train/train_loss_epoch", "val/val_loss_epoch"]],
-            },
+    metric_writer.add_custom_scalars(
+        {
+            "my_layout": {
+                "loss_step": ["Multiline", ["train/train_loss_step", "val/val_loss_step"]],
+                "loss_epoch": ["Multiline", ["train/train_loss_epoch", "val/val_loss_epoch"]],
+                "checkpoint_mse": ["Multiline", ["val/val_checkpoint_mse_epoch"]],
+            }
         }
-    metric_writer.add_custom_scalars(layout)
-    
-    # metric_writer.add_graph(model=model)
-    
-    # Replicate state across all devices for pmap
-    mesh = jax.sharding.Mesh(np.array(devices), axis_names=('i',))
-    sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec('i'))
-    state = jax.tree.map(lambda x: jnp.stack([x] * num_devices), state)
-    state = jax.device_put(state, sharding)
+    )
 
-    def _build_warmup_batch(example, batch_size: int):
-        spectra = jnp.repeat(example["spectra"], repeats=batch_size, axis=0)
-        masked_spectra = jnp.repeat(example["masked_spectra"], repeats=batch_size, axis=0)
-        return {
-            "spectra": spectra,
-            "masked_spectra": masked_spectra,
-            "wave_number": example["wave_number"],
-            "mask": example["mask"],
-        }
+    is_masked_loss = bool(getattr(configs, "is_masked_loss", True))
+    best_val_mse = float("inf")
+    restored_epoch = int(np.asarray(state.epoch))
 
-    def _apply_dynamic_mask_for_train(batch, wave_number_raw, rng_key, batch_idx: int):
+    def apply_dynamic_mask(batch, wave_number_raw, rng_key, batch_index):
         if not getattr(configs, "dynamic_mask", False):
             return batch
-        mask_seed = int(jax.random.fold_in(rng_key, batch_idx)[0])
-        mask_rng = np.random.default_rng(mask_seed)
-        mask_windows = _build_dynamic_mask_windows_np(
+        seed = int(jax.random.fold_in(rng_key, batch_index)[0])
+        mask_rng = np.random.default_rng(seed)
+        windows = _build_dynamic_mask_windows_np(
             wave_number_raw,
             mask_rng,
             chunk_size=getattr(configs, "mask_chunk_size", 200),
@@ -440,393 +280,144 @@ def main(args: TrainArgs) -> None:
         return _apply_mask_to_batch(
             batch,
             wave_number_raw,
-            mask_windows,
+            windows,
             default_mask_value=getattr(configs, "default_mask_value", -1),
         )
 
-    def _apply_dynamic_mask_for_val(batch, wave_number_raw, epoch_idx: int):
-        if not getattr(configs, "dynamic_mask", False):
-            return batch
-        base_key = jax.random.PRNGKey(getattr(configs, "root_rng_seed", 0))
-        mask_seed = int(jax.random.fold_in(base_key, epoch_idx)[0])
-        mask_rng = np.random.default_rng(mask_seed)
-        mask_windows = _build_dynamic_mask_windows_np(
-            wave_number_raw,
-            mask_rng,
-            chunk_size=getattr(configs, "mask_chunk_size", 200),
-            min_chunks=getattr(configs, "mask_chunk_min", 2),
-            max_chunks=getattr(configs, "mask_chunk_max", 6),
-        )
-        return _apply_mask_to_batch(
-            batch,
-            wave_number_raw,
-            mask_windows,
-            default_mask_value=getattr(configs, "default_mask_value", -1),
-        )
-
-    warmup_epoch = int(restored_epoch) + 1
-    mask_windows_for_loader = [] if getattr(configs, "dynamic_mask", False) else list(
-        zip(configs.masked_interval_starts, configs.masked_interval_ends)
-    )
-    if stream_datasets:
-        warmup_nc_file, warmup_filter = dataset_specs[0]
-        warmup_train_ds, warmup_val_ds = load_dataset_for_file(
-            warmup_nc_file,
-            warmup_filter,
-        )
-        warmup_dataset_name = warmup_nc_file.name
-    else:
-        warmup_train_ds, warmup_val_ds, warmup_dataset_name, _ = datasets[0]
-
-    warmup_train_batch = next(
-        batch_sampler(
-            warmup_train_ds,
-            mask_windows_for_loader,
-            batch_size=configs.batch_size,
-            rng_seed=warmup_epoch,
-            shuffle=True,
-        )
-    )
-    warmup_val_batch = next(
-        batch_sampler(
-            warmup_val_ds,
-            mask_windows_for_loader,
-            batch_size=configs.batch_size,
-            rng_seed=warmup_epoch,
-            shuffle=True,
-        )
-    )
-
-    warmup_train_batch = _apply_dynamic_mask_for_train(
-        warmup_train_batch,
-        jnp.asarray(warmup_train_ds["wave_number"].values),
-        window_RNG_key,
-        batch_idx=0,
-    )
-    warmup_val_batch = _apply_dynamic_mask_for_val(
-        warmup_val_batch,
-        jnp.asarray(warmup_val_ds["wave_number"].values),
-        warmup_epoch,
-    )
-
-    if args.debug_logging:
-        logger.debug(
-            "Warmup batch shapes train_spectra={} val_spectra={} wave={} mask={}",
-            getattr(warmup_train_batch["spectra"], "shape", "?"),
-            getattr(warmup_val_batch["spectra"], "shape", "?"),
-            getattr(warmup_train_batch["wave_number"], "shape", "?"),
-            getattr(warmup_train_batch["mask"], "shape", "?"),
-        )
-
-    if stream_datasets:
-        del warmup_train_ds, warmup_val_ds
-        gc.collect()
-    warmup_steps = 2
-    if args.debug_logging:
-        logger.debug(
-            "Warmup compile start: regime={} batch_size={} steps={}",
-            training_regime,
-            configs.batch_size,
-            warmup_steps,
-        )
-        logger.debug("Warmup compile dataset={}", warmup_dataset_name)
-    if training_regime == "All devices":
-        if args.debug_logging:
-            logger.debug("Warmup lower+compile start")
-        warmup_lower_compile_pmap(
-            state,
-            warmup_train_batch,
-            rng_streams,
-            mean_streams,
-            num_devices,
-            configs.loss_fn,
-            is_masked_loss,
-        )
-        if args.debug_logging:
-            logger.debug("Warmup lower+compile completed")
-        warmup_compile_pmap(
-            state,
-            warmup_train_batch,
-            rng_streams,
-            mean_streams,
-            num_devices,
-            configs.loss_fn,
-            steps=warmup_steps,
-            run_train=True,
-            run_val=False,
-            is_masked_loss=is_masked_loss,
-        )
-        warmup_compile_pmap(
-            state,
-            warmup_val_batch,
-            rng_streams,
-            mean_streams,
-            num_devices,
-            configs.loss_fn,
-            steps=1,
-            run_train=False,
-            run_val=True,
-            is_masked_loss=is_masked_loss,
-        )
-    else:
-        warmup_compile_single(
-            state,
-            warmup_train_batch,
-            rng_streams,
-            mean_streams,
-            steps=warmup_steps,
-            run_train=True,
-            run_val=False,
-            is_masked_loss=is_masked_loss,
-        )
-        warmup_compile_single(
-            state,
-            warmup_val_batch,
-            rng_streams,
-            mean_streams,
-            steps=1,
-            run_train=False,
-            run_val=True,
-            is_masked_loss=is_masked_loss,
-        )
-    if args.debug_logging:
-        logger.debug("Warmup compile completed")
+    def scalar(x):
+        return float(np.asarray(jax.device_get(x)).reshape(-1)[0])
 
     for epoch in range(restored_epoch + 1, restored_epoch + configs.num_epochs + 1):
         epoch_start = time.perf_counter()
-        window_RNG_key = jax.random.split(window_RNG_key, num=1)[0]
+        window_key = jax.random.fold_in(window_key, epoch)
 
-        epoch_train_metrics = []
-        epoch_val_metrics = []
+        train_losses = []
+        train_batch_index = 0
 
-        dataset_order = jax.random.permutation(
-            window_RNG_key,
-            len(dataset_specs) if stream_datasets else len(datasets),
-        )
-        
-        for ds_idx in dataset_order:
-            if stream_datasets:
-                nc_file, use_filter = dataset_specs[int(ds_idx)]
-                if args.debug_logging:
-                    load_start = time.perf_counter()
-                train_ds, val_ds = load_dataset_for_file(nc_file, use_filter)
-                logger.debug(
-                    f"Dataset {nc_file.name} (filter={use_filter}): train={train_ds.shape[1]}, val={val_ds.shape[1]}"
+        for name, use_filter, train_ds in train_parts:
+            for batch in batch_sampler(
+                train_ds,
+                mask_windows_for_loader,
+                batch_size=configs.batch_size,
+                rng_seed=epoch,
+                shuffle=True,
+                drop_last=True,
+                default_mask_value=getattr(configs, "default_mask_value", -1),
+            ):
+                batch = apply_dynamic_mask(
+                    batch,
+                    jnp.asarray(train_ds["wave_number"].values),
+                    window_key,
+                    train_batch_index,
                 )
-                if args.debug_logging:
-                    logger.debug(
-                        "Dataset load time {}: {:.3f}s",
-                        nc_file.name,
-                        time.perf_counter() - load_start,
-                    )
-                    logger.debug(
-                        "Dataset {} wave_len={} train_steps={} val_steps={}",
-                        nc_file.name,
-                        train_ds["wave_number"].shape[0],
-                        -(-train_ds.sizes["spectra"] // configs.batch_size),
-                        -(-val_ds.sizes["spectra"] // configs.batch_size),
-                    )
-                if train_ds.sizes['spectra'] < configs.batch_size or val_ds.sizes['spectra'] < configs.batch_size:
-                    logger.warning(
-                        f"Skipping {nc_file.name}: insufficient spectra for batch size {configs.batch_size}"
-                    )
-                    del train_ds, val_ds
-                    gc.collect()
-                    continue
-            else:
-                train_ds, val_ds, dataset_name, use_filter = datasets[int(ds_idx)]
-                logger.debug(
-                    f"Dataset {dataset_name} (filter={use_filter}): train={train_ds.shape[1]}, val={val_ds.shape[1]}"
+                state, metrics = train_step(
+                    state,
+                    batch,
+                    dropout_key,
+                    "Not specified",
+                    is_masked_loss=is_masked_loss,
                 )
-                if args.debug_logging:
-                    logger.debug(
-                        "Dataset {} wave_len={} train_steps={} val_steps={}",
-                        dataset_name,
-                        train_ds["wave_number"].shape[0],
-                        -(-train_ds.sizes["spectra"] // configs.batch_size),
-                        -(-val_ds.sizes["spectra"] // configs.batch_size),
-                    )
-            
-            match training_regime:
-                case "One device":
-                    
-                    # Training
-                    if args.debug_logging:
-                        train_start = time.perf_counter()
-                    state, train_metrics_ds = train_epoch(
-                        state, epoch, train_ds, configs, rng_streams,
-                        metric_writer, ckpt_manager, window_RNG_key, mean_streams,
-                        is_masked_loss=is_masked_loss
-                    )
-                    if args.debug_logging:
-                        logger.debug(
-                            "Train epoch time (dataset {}) {:.3f}s",
-                            nc_file.name if stream_datasets else dataset_name,
-                            time.perf_counter() - train_start,
-                        )
-                    # Validation
-                    if args.debug_logging:
-                        val_start = time.perf_counter()
-                    state, val_metrics_ds = validation_epoch(
-                        state, epoch, val_ds, configs, rng_streams, 
-                        metric_writer, ckpt_manager, mean_streams,
-                        is_masked_loss=is_masked_loss
-                    )
-                    if args.debug_logging:
-                        logger.debug(
-                            "Validation time (dataset {}) {:.3f}s",
-                            nc_file.name if stream_datasets else dataset_name,
-                            time.perf_counter() - val_start,
-                        )
-                case "All devices":
-                    
-                    if args.debug_logging:
-                        train_start = time.perf_counter()
-                    state, train_metrics_ds = train_epoch_pmap(
-                        state=state, epoch=epoch, train_ds=train_ds, configs=configs, 
-                        rng_streams=rng_streams, metric_writer=metric_writer, ckpt_manager=ckpt_manager, 
-                        window_RNG_key=window_RNG_key, mean_streams=mean_streams,
-                        is_masked_loss=is_masked_loss
-                        )
-                    if args.debug_logging:
-                        logger.debug(
-                            "Train epoch pmap time (dataset {}) {:.3f}s",
-                            nc_file.name if stream_datasets else dataset_name,
-                            time.perf_counter() - train_start,
-                        )
-                    if args.debug_logging:
-                        val_start = time.perf_counter()
-                    state, val_metrics_ds = validation_epoch_pmap(
-                        state=state, epoch=epoch, val_ds=val_ds, configs=configs, 
-                        rng_streams=rng_streams, metric_writer=metric_writer, ckpt_manager=ckpt_manager,
-                        window_RNG_key=window_RNG_key, mean_streams=mean_streams,
-                        is_masked_loss=is_masked_loss
-                        )
-                    if args.debug_logging:
-                        logger.debug(
-                            "Validation epoch pmap time (dataset {}) {:.3f}s",
-                            nc_file.name if stream_datasets else dataset_name,
-                            time.perf_counter() - val_start,
-                        )
-                case _:
-                    raise Exception(f"Specify training_regime correctly!")
-            
-            epoch_train_metrics.append(train_metrics_ds)
-            epoch_val_metrics.append(val_metrics_ds)
+                loss_value = scalar(metrics["train_loss"])
+                train_losses.append(loss_value)
+                metric_writer.add_scalar("train/train_loss_step", loss_value, int(np.asarray(state.step)))
+                train_batch_index += 1
 
-            if stream_datasets:
-                del train_ds, val_ds
-                gc.collect()
+        val_losses = []
+        val_mses = []
+        val_batch_index = 0
 
-        if not epoch_train_metrics or not epoch_val_metrics:
-            logger.warning("No datasets were processed this epoch. Check batch size and dataset sizes.")
-            break
-
-        train_metrics.append(
-            jax.tree.map(lambda *xs: jnp.mean(jnp.stack(xs)), *epoch_train_metrics)
-        )
-        val_metrics.append(
-            jax.tree.map(lambda *xs: jnp.mean(jnp.stack(xs)), *epoch_val_metrics)
-        )
-        
-        # Write epoch+1 to the state
-        state = update_epoch(state)
-        
-        # Logging
-        if epoch % configs.log_every_epochs == 0:
-            
-            params0 = jax.tree.map(lambda x: x[0], state.params)
-            
-            # Making a prediction on a dummy for logging in tensorboard
-            dummy_prediction = predict(
-                state.apply_fn,
-                {"params": params0},
-                dummy_example,
-                dummy_example["mask"],
-            )
-            
-            # Calculating a loss for plotting
-            dummy_spectra = jnp.squeeze(dummy_example["spectra"])
-            dummy_pred_spectra = jnp.squeeze(dummy_prediction["predicted_spectra"])
-            
-            match configs.loss_fn if hasattr(configs, 'loss_fn') else "CorrGamma":
-                case "MSE":
-                    loss = (dummy_pred_spectra - dummy_spectra) ** 2
-                case "CorrGamma":
-                    dummy_ratio = dummy_spectra / dummy_pred_spectra
-                    loss = (( dummy_ratio - 1) - jnp.log( dummy_ratio ))
-                case _:
-                    raise Exception(f"Specify loss_fn correctly in config!")
-            
-            fig_res, ax_res = plot_results_train(dummy_prediction, state.step[0], state.epoch[0], args.model_tag)
-            metric_writer.add_figure('model_predictions', fig_res, global_step=state.epoch[0])
-
-            fig_loss, ax_loss = plot_loss(
-                dummy_wave_number,
-                loss,
-                state.step[0],
-                state.epoch[0],
-                args.model_tag,
-                mask=dummy_example["mask"],
-            )
-            metric_writer.add_figure('model_prediction_losses', fig_loss, global_step=state.epoch[0])
-            
-            metric_writer.add_scalar("train/train_loss_epoch",          train_metrics[-1]["train_loss_step"],   state.epoch[0])
-            metric_writer.add_scalar("val/val_loss_epoch",              val_metrics[-1]["val_loss_step"],       state.epoch[0])
-            
-            metric_writer.add_scalar("train/train_loss_step",           train_metrics[-1]["train_loss_step"],   state.step[0])
-            metric_writer.add_scalar("val/val_loss_step",               val_metrics[-1]["val_loss_step"],       state.step[0])
-            
-            metric_writer.add_scalar("grad/train/grad_min_step",        train_metrics[-1]["grad_min"],          state.step[0])
-            metric_writer.add_scalar("grad/train/grad_mean_step",       train_metrics[-1]["grad_mean"],         state.step[0])
-            metric_writer.add_scalar("grad/train/grad_median_step",     train_metrics[-1]["grad_median"],       state.step[0])
-            metric_writer.add_scalar("grad/train/grad_max_step",        train_metrics[-1]["grad_max"],          state.step[0])
-            
-            for gpu_stats in gpustat.new_query():
-                log_gpu_usage(gpu_stats.entry, state.step[0], metric_writer)
-            
-            # Extract first replica and convert to host arrays (removes sharding metadata)
-            single_state = jax.device_get(jax.tree.map(lambda x: x[0], state))
-            if args.debug_logging:
-                ckpt_start = time.perf_counter()
-            ckpt_manager.save(
-                step=int(single_state.step),
-                args=ocp.args.StandardSave(single_state),
-            )
-            if args.debug_logging:
-                logger.debug(
-                    "checkpoint saved in {:.3f}s",
-                    time.perf_counter() - ckpt_start,
+        for name, use_filter, val_ds in val_parts:
+            for batch in batch_sampler(
+                val_ds,
+                mask_windows_for_loader,
+                batch_size=configs.batch_size,
+                rng_seed=epoch,
+                shuffle=False,
+                drop_last=True,
+                default_mask_value=getattr(configs, "default_mask_value", -1),
+            ):
+                batch = apply_dynamic_mask(
+                    batch,
+                    jnp.asarray(val_ds["wave_number"].values),
+                    jax.random.PRNGKey(configs.root_rng_seed + epoch),
+                    val_batch_index,
                 )
+                state, metrics = validation_step(
+                    state,
+                    batch,
+                    dropout_key,
+                    "Not specified",
+                    is_masked_loss=is_masked_loss,
+                )
+                val_loss = scalar(metrics["val_gamma_nll_loss"])
+                val_mse = scalar(metrics["MSE"])
+                val_losses.append(val_loss)
+                val_mses.append(val_mse)
+                metric_writer.add_scalar("val/val_loss_step", val_loss, int(np.asarray(state.step)))
+                metric_writer.add_scalar("val/val_checkpoint_mse_step", val_mse, int(np.asarray(state.step)))
+                val_batch_index += 1
 
-        early_stop = early_stop.update(val_metrics[-1]["val_loss_step"])
-        best_metric_value = min(metric["val_loss_step"] for metric in val_metrics)
-        metrics_diff = val_metrics[-1]["val_loss_step"] - best_metric_value
-        total_epoch_time = time.perf_counter() - epoch_start
-        if is_early_stop:
+        if not train_losses or not val_losses:
+            raise RuntimeError("No batches were processed in this epoch.")
+
+        train_loss_epoch = float(np.nanmean(train_losses))
+        val_loss_epoch = float(np.nanmean(val_losses))
+        val_mse_epoch = float(np.nanmean(val_mses))
+
+        metric_writer.add_scalar("train/train_loss_epoch", train_loss_epoch, epoch)
+        metric_writer.add_scalar("val/val_loss_epoch", val_loss_epoch, epoch)
+        metric_writer.add_scalar("val/val_checkpoint_mse_epoch", val_mse_epoch, epoch)
+
+        logger.info(
+            f"Epoch {epoch} -- train GammaNLL {train_loss_epoch:.3e} -- "
+            f"val GammaNLL {val_loss_epoch:.3e} -- val MSE {val_mse_epoch:.3e}"
+        )
+
+        if val_mse_epoch < best_val_mse:
+            old_best = best_val_mse
+            best_val_mse = val_mse_epoch
+            state = state.replace(epoch=jnp.array(epoch, dtype=jnp.int32))
+            step_value = int(np.asarray(state.step))
+            ckpt_manager.save(step_value, args=ocp.args.StandardSave(state))
             logger.info(
-                f"Epoch {epoch} | "
-                f"Time: {total_epoch_time:.2f}s | "
-                f"train_loss={train_metrics[-1]['train_loss_step']:.4e} | "
-                f"val_loss={val_metrics[-1]['val_loss_step']:.4e} | "
-                f"patience={early_stop.patience_count}/{patience}"
+                f"Saved best checkpoint at epoch {epoch}, step {step_value}: "
+                f"MSE {val_mse_epoch:.3e} previous {old_best:.3e}"
             )
-        else:
-            logger.info(
-                f"Epoch {epoch} | "
-                f"Time: {total_epoch_time:.2f}s | "
-                f"train_loss={train_metrics[-1]['train_loss_step']:.4e} | "
-                f"val_loss={val_metrics[-1]['val_loss_step']:.4e}"
-            )
-        if is_early_stop and early_stop.should_stop:
-            logger.warning(f"Early stopping triggered at epoch {epoch}")
-            break
 
-    ckpt_manager.wait_until_finished()
+        state = state.replace(epoch=jnp.array(epoch, dtype=jnp.int32))
+        metric_writer.flush()
+        gc.collect()
+
+        logger.info(f"Epoch time: {time.perf_counter() - epoch_start:.1f}s")
+
+    final_batch = next(
+        batch_sampler(
+            val_parts[0][2],
+            mask_windows_for_loader,
+            batch_size=1,
+            shuffle=False,
+            drop_last=True,
+            default_mask_value=getattr(configs, "default_mask_value", -1),
+        )
+    )
+    final_batch = apply_dynamic_mask(
+        final_batch,
+        jnp.asarray(val_parts[0][2]["wave_number"].values),
+        jax.random.PRNGKey(configs.root_rng_seed),
+        0,
+    )
+
+    res = plot_results_train(
+        apply_fn=state.apply_fn,
+        variables={"params": state.params},
+        batch=final_batch,
+        raman_shift=val_parts[0][2].wave_number.values,
+    )
+    fig = plot_loss(res, is_masked_loss=is_masked_loss)
+    metric_writer.add_figure("final_loss_on_example", fig)
     metric_writer.close()
-    logger.info("Training completed")
+    ckpt_manager.close()
 
 
 if __name__ == "__main__":
-    args = tyro.cli(TrainArgs)
-    main(args)
+    main(tyro.cli(TrainArgs))
