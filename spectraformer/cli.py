@@ -91,10 +91,25 @@ def main(args: InferenceArgs) -> None:
     if latest_step is None:
         raise FileNotFoundError(f"No checkpoint found in {args.checkpoint}")
 
-    state = ckpt_manager.restore(
-        latest_step,
-        args=ocp.args.StandardRestore(state),
-    )
+    try:
+        restored = ckpt_manager.restore(
+            latest_step,
+            args=ocp.args.StandardRestore(state, partial_restore=True),
+        )
+    except (TypeError, ValueError):
+        restored = ckpt_manager.restore(latest_step)
+
+    def _extract_params(obj):
+        if hasattr(obj, "params"):
+            return obj.params
+        if isinstance(obj, dict):
+            if "params" in obj:
+                return obj["params"]
+            if "default" in obj:
+                return _extract_params(obj["default"])
+        raise TypeError(f"Cannot extract params from checkpoint object of type {type(obj)}")
+
+    state = state.replace(params=_extract_params(restored))
 
     def apply_dynamic_mask(batch, wave_number_raw, batch_index):
         if not getattr(configs, "dynamic_mask", False):
