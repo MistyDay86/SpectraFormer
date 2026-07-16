@@ -84,7 +84,7 @@ def preprocess_dataset(
     sup_norm_threshold: float = 0.15,
     verbose: bool = True,
     is_filter: bool = False,
-    option: str = 'proper_bg_proper_norm'
+    option: str = 'whitaker_hayes_with_outliers'
 ) -> xr.DataArray:
     """Preprocess xarray datasets by subtracting the background, normalizing to the max and removing outliers, i.e. spectra with cosmic rays or other artifacts.
 

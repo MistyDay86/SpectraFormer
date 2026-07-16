@@ -26,7 +26,7 @@ if __name__ == "__main__":
     # Define directories
 
     datadir = Path(__file__).parent / "data"
-    material = "buffer+graphene" # Specify your folder
+    material = "buffer+graphene/stdrecipe_1" # Specify your folder
     raw_data_dir = datadir / 'raw_data' / material
     parsed_data_dir = datadir / 'parsed_data_spatial' / material
 
@@ -40,13 +40,13 @@ if __name__ == "__main__":
                 file_path = os.path.join(root, file)
                 relative_path = os.path.relpath(file_path, raw_data_dir)
                 parts = relative_path.split(os.sep)
-                if len(parts) == 1:
-                    # File is in the main folder
-                    system_type = "main"
-                    subdirs = []
-                else:
-                    system_type = parts[0]
-                    subdirs = parts[1:-1]
+                # if len(parts) == 1:
+                #     # File is in the main folder
+                #     system_type = "main"
+                #     subdirs = []
+                # else:
+                system_type = parts[0]
+                subdirs = parts[1:-1]
 
                 # Parse the dataset
                 dataset = parse_dataset(file_path)
