@@ -72,6 +72,22 @@ def _masked_gamma_loss(target, pred, mask, reduction: str, eps: float = 1e-8, is
             raise Exception(f"You didn't specify a mean to be used!")
 
 
+def _masked_gamma_nll_loss(target, mu, alpha, mask, eps: float = 1e-6, is_masked_loss=True):
+    target = jnp.clip(target, eps, None)
+    mu = jnp.clip(mu, eps, None)
+    alpha = jnp.clip(alpha, eps, None)
+    nll = (
+        -(alpha - 1.0) * jnp.log(target)
+        + target * alpha / mu
+        + alpha * jnp.log(mu / alpha)
+        + jax.scipy.special.gammaln(alpha)
+    )
+    loss_mask = mask.astype(nll.dtype) if is_masked_loss else jnp.ones_like(nll)
+    masked_nll = nll * loss_mask
+    masked_count = jnp.maximum(jnp.sum(loss_mask), 1.0)
+    return jnp.sum(masked_nll) / masked_count
+
+
 def _masked_mse_loss(target, pred, mask):
     """Mean squared error computed only on hidden positions."""
     hidden_mask = _hidden_region_mask(mask).astype(pred.dtype)
@@ -390,102 +406,42 @@ def shard_batch(batch: Batch) -> Batch:
 
 
 @partial(jax.jit, static_argnames=("configs_mean", "is_masked_loss"))
-def train_step(
-    state: TrainState, 
-    batch: Batch, 
-    dropout_key,
-    configs_mean,
-    is_masked_loss=True
-):
-    dropout_train_key = jax.random.fold_in(key=dropout_key, data=state.step)
-    
-    def corrected_gamma_loss_fn(params):
-        pred_spectra = state.apply_fn(
-            {"params": params},
-            batch["masked_spectra"],
-            batch["wave_number"],
-            batch["mask"],
-            training=True,
-            rngs={"dropout": dropout_train_key},
-        )
-        
-        nan_inf_check(pred_spectra)
-
-        loss = _masked_gamma_loss(
-            batch["spectra"],
-            pred_spectra,
-            batch["mask"],
-            reduction=configs_mean,
-            is_masked_loss=is_masked_loss,
-        )
-        
-        return loss
-    
-    grad_fn = jax.value_and_grad(corrected_gamma_loss_fn)
-    loss, grads = grad_fn(state.params)
-    
-    # Flatten the PyTree of gradients
-    flat_grads, _ = jax.tree_util.tree_flatten(grads)
-    # Concatenate all gradients into a single array for statistics
-    all_grads = jnp.concatenate([jnp.ravel(g) for g in flat_grads])
-    
-    nan_inf_check(all_grads)
-    
-    # Compute gradient parameters for logging
-    grad_min = jnp.min(all_grads)
-    grad_mean = jnp.mean(all_grads)
-    grad_median = jnp.median(all_grads)
-    grad_max = jnp.max(all_grads)
-    
-    state = state.apply_gradients(grads=grads)
-    train_metrics = {
-        "train_loss": loss,
-        "grad_min": grad_min,
-        "grad_mean": grad_mean,
-        "grad_median": grad_median,
-        "grad_max": grad_max
-        }
-    return state, train_metrics
-
-@partial(jax.jit, static_argnames=("configs_mean", "is_masked_loss"))
 def validation_step(
-    state: TrainState, 
-    batch: Batch, 
+    state: TrainState,
+    batch: Batch,
     dropout_key,
     configs_mean,
     is_masked_loss=True
 ):
-    dropout_val_key = jax.random.fold_in(key=dropout_key, data=state.step)
-    
-    pred_spectra = state.apply_fn(
-                {"params": state.params},
-                batch["masked_spectra"],
-                batch["wave_number"],
-                batch["mask"],
-                training=False,
-                rngs={"dropout": dropout_val_key},
-            )
-    
-    nan_inf_check(pred_spectra)
-    
-    def val_corrected_gamma_fn(params):
-        loss = _masked_gamma_loss(
-            batch["spectra"],
-            pred_spectra,
-            batch["mask"],
-            reduction=configs_mean,
-            is_masked_loss=is_masked_loss,
-        )
-        return loss
+    step_scalar = jnp.ravel(state.step)[0]
+    dropout_val_key = jax.random.fold_in(key=dropout_key, data=step_scalar)
 
-    corrected_gamma_loss = val_corrected_gamma_fn(state.params)
-    mse = _masked_mse_loss(batch["spectra"], pred_spectra, batch["mask"])             # Mean square error on hidden positions only
-    
+    pred_mu, pred_alpha = state.apply_fn(
+        {"params": state.params},
+        batch["masked_spectra"],
+        batch["wave_number"],
+        batch["mask"],
+        training=False,
+        rngs={"dropout": dropout_val_key},
+    )
+    nan_inf_check(pred_mu)
+    nan_inf_check(pred_alpha)
+
+    gamma_nll_loss = _masked_gamma_nll_loss(
+        batch["spectra"],
+        pred_mu,
+        pred_alpha,
+        batch["mask"],
+        is_masked_loss=is_masked_loss,
+    )
+    mse = _masked_mse_loss(batch["spectra"], pred_mu, batch["mask"])
+
     val_metrics = {
-        "val_corrected_gamma_loss": corrected_gamma_loss,
+        "val_gamma_nll_loss": gamma_nll_loss,
         "MSE": mse
-        }
+    }
     return state, val_metrics
+
 
 def train_epoch(
     state, epoch: int, train_ds, configs, rng_streams, metric_writer, ckpt_manager, window_RNG_key, mean_streams,
@@ -625,8 +581,7 @@ def train_epoch(
         metric_writer.add_scalar("train/grad_max", avg_metrics["grad_max"].item(), state.step)
         for gpu_stats in gpustat.new_query():
             log_gpu_usage(gpu_stats.entry, state.step, metric_writer)
-        ckpt_manager.save(state.step, state)
-    return state, metrics
+        return state, metrics
 
 def validation_epoch(
     state, epoch: int, val_ds, configs, rng_streams, metric_writer, ckpt_manager, mean_streams,
@@ -739,14 +694,13 @@ def validation_epoch(
     metrics = stack_forest(metrics)
     avg_metrics = jax.tree.map(jnp.mean, metrics)  # Log the average error of the epoch
 
-    logger.info(f"Validation -- Epoch {epoch + 1} -- CorrGamma Loss {avg_metrics['val_corrected_gamma_loss'].item():.3e}")
+    logger.info(f"Validation -- Epoch {epoch + 1} -- GammaNLL Loss {avg_metrics['val_gamma_nll_loss'].item():.3e}")
     if epoch % configs.log_every_epochs == 0:
-        metric_writer.add_scalar("val/val_corrected_gamma_loss", avg_metrics["val_corrected_gamma_loss"].item(), state.step)
+        metric_writer.add_scalar("val/val_gamma_nll_loss", avg_metrics["val_gamma_nll_loss"].item(), state.step)
         metric_writer.add_scalar("val/MSE", avg_metrics["MSE"].item(), state.step)
         for gpu_stats in gpustat.new_query():
             log_gpu_usage(gpu_stats.entry, state.step, metric_writer)
-        ckpt_manager.save(state.step, state)
-    return state, metrics
+        return state, metrics
 
 # ==========================
 #     MULTI-DEVICE TRAIN STEP WITH ARITHMETIC LOSS
@@ -762,7 +716,7 @@ def train_step_pmap_arithmetic(
     batch,
     dropout_key,
     num_devices: int,  # Passed explicitly
-    loss_fn: str = "CorrGamma",  # Default loss function
+    loss_fn: str = "GammaNLL",  # Default loss function
     is_masked_loss: bool = True
 ):
     # Get device index for unique key folding
@@ -809,12 +763,12 @@ def train_step_pmap_arithmetic(
         return _masked_mse_loss(batch["spectra"], pred_spectra, batch["mask"])
     
     match loss_fn:
-        case "CorrGamma":
+        case "GammaNLL":
             local_loss, local_grads = jax.value_and_grad(corrected_gamma_loss_fn)(state.params)
         case "MSE":
             local_loss, local_grads = jax.value_and_grad(mse_loss_fn)(state.params)
         case _:
-            raise ValueError(f"Unknown loss function: {loss_fn}. Supported: 'CorrGamma', 'MSE'.")
+            raise ValueError(f"Unknown loss function: {loss_fn}. Supported: 'GammaNLL', 'MSE'.")
     
     # Average loss across devices
     global_loss = lax.psum(local_loss, axis_name="batch") / num_devices 
@@ -862,7 +816,7 @@ def validation_step_pmap_arithmetic(
     batch, 
     dropout_key,
     num_devices: int,  # Passed explicitly
-    loss_fn: str = "CorrGamma",  # Default loss function
+    loss_fn: str = "GammaNLL",  # Default loss function
     is_masked_loss: bool = True
 ):
     # Get device index for unique key folding
@@ -910,12 +864,12 @@ def validation_step_pmap_arithmetic(
         return _masked_mse_loss(batch["spectra"], pred_spectra, batch["mask"])
     
     match loss_fn:
-        case "CorrGamma":
+        case "GammaNLL":
             local_loss = corrected_gamma_loss_fn(state.params)
         case "MSE":
             local_loss = mse_loss_fn(state.params)
         case _:
-            raise ValueError(f"Unknown loss function: {loss_fn}. Supported: 'CorrGamma', 'MSE'.")
+            raise ValueError(f"Unknown loss function: {loss_fn}. Supported: 'GammaNLL', 'MSE'.")
     
     # Average loss across devices
     global_loss = lax.psum(local_loss, axis_name="batch") / num_devices
