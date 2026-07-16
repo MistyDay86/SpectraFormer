@@ -200,66 +200,11 @@ def main(args: InferenceArgs) -> None:
         if np.nanmax(wave_number) < 10:
             wave_number = wave_number * 800 + 2000
 
-        # Normalize mask for NetCDF export.
-    # dataset_loader may return a 1D spectral mask, while the output Dataset
-    # stores all spectral arrays as sample x wave_number.
-    _export_mask_arr = np.asarray(mask_np if "mask_np" in locals() else mask).squeeze().astype(bool)
-
-    _export_ref = None
-    for _name in (
-        "predicted_spectra_np",
-        "predicted_spectra",
-        "predicted_mu_np",
-        "predicted_mu",
-        "pred_mu_np",
-        "pred_mu",
-        "spectra_np",
-        "spectra",
-        "masked_spectra_np",
-        "masked_spectra",
-    ):
-        if _name in locals():
-            _candidate = np.asarray(locals()[_name]).squeeze()
-            if _candidate.ndim == 2:
-                _export_ref = _candidate
-                break
-
-    if _export_ref is None:
-        raise RuntimeError("Cannot infer sample x wave_number shape for mask export.")
-
-    _n_sample, _n_wave = _export_ref.shape
-
-    if _export_mask_arr.ndim == 1:
-        if _export_mask_arr.size == _n_wave:
-            mask_2d = np.broadcast_to(_export_mask_arr[None, :], (_n_sample, _n_wave))
-        elif _export_mask_arr.size == _n_sample:
-            mask_2d = np.broadcast_to(_export_mask_arr[:, None], (_n_sample, _n_wave))
-        elif _export_mask_arr.size == _n_sample * _n_wave:
-            mask_2d = _export_mask_arr.reshape((_n_sample, _n_wave))
-        else:
-            raise ValueError(
-                f"Cannot broadcast mask with shape {_export_mask_arr.shape} "
-                f"to sample x wave_number shape {(_n_sample, _n_wave)}"
-            )
-    elif _export_mask_arr.ndim == 2:
-        if _export_mask_arr.shape == (_n_sample, _n_wave):
-            mask_2d = _export_mask_arr
-        elif _export_mask_arr.shape == (_n_wave, _n_sample):
-            mask_2d = _export_mask_arr.T
-        else:
-            raise ValueError(
-                f"Mask shape {_export_mask_arr.shape} incompatible with "
-                f"sample x wave_number shape {(_n_sample, _n_wave)}"
-            )
-    else:
-        raise ValueError(f"Mask must be 1D or 2D, got shape {_export_mask_arr.shape}")
-
-
-    out = xr.Dataset(
+        out = xr.Dataset(
             data_vars={
                 "spectra": (("sample", "wave_number"), spectra),
                 "masked_spectra": (("sample", "wave_number"), masked_spectra),
-                "mask": (("sample", "wave_number"), mask_2d),
+                "mask": (("sample", "wave_number"), (np.asarray(mask).squeeze() if np.asarray(mask).squeeze().ndim == 2 else np.broadcast_to(np.asarray(mask).squeeze()[None, :], np.asarray(spectra).squeeze().shape))),
                 "predicted_spectra": (("sample", "wave_number"), predicted_spectra),
                 "predicted_mu": (("sample", "wave_number"), mu),
                 "predicted_alpha": (("sample", "wave_number"), alpha),
