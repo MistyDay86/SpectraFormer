@@ -1391,3 +1391,90 @@ def validation_epoch_pmap(
         
     return state, avg_metrics
 
+
+
+
+@partial(jax.jit, static_argnames=("configs_mean", "is_masked_loss"))
+def train_step(
+    state: TrainState,
+    batch: Batch,
+    dropout_key,
+    configs_mean,
+    is_masked_loss=True
+):
+    step_scalar = jnp.ravel(state.step)[0]
+    dropout_train_key = jax.random.fold_in(key=dropout_key, data=step_scalar)
+
+    def gamma_nll_loss_fn(params):
+        pred_mu, pred_alpha = state.apply_fn(
+            {"params": params},
+            batch["masked_spectra"],
+            batch["wave_number"],
+            batch["mask"],
+            training=True,
+            rngs={"dropout": dropout_train_key},
+        )
+        nan_inf_check(pred_mu)
+        nan_inf_check(pred_alpha)
+        return _masked_gamma_nll_loss(
+            batch["spectra"],
+            pred_mu,
+            pred_alpha,
+            batch["mask"],
+            is_masked_loss=is_masked_loss,
+        )
+
+    loss, grads = jax.value_and_grad(gamma_nll_loss_fn)(state.params)
+
+    flat_grads, _ = jax.tree_util.tree_flatten(grads)
+    all_grads = jnp.concatenate([jnp.ravel(g) for g in flat_grads])
+    nan_inf_check(all_grads)
+
+    state = state.apply_gradients(grads=grads)
+    train_metrics = {
+        "train_loss": loss,
+        "train_gamma_nll_loss": loss,
+        "grad_min": jnp.min(all_grads),
+        "grad_mean": jnp.mean(all_grads),
+        "grad_median": jnp.median(all_grads),
+        "grad_max": jnp.max(all_grads),
+    }
+    return state, train_metrics
+
+
+@partial(jax.jit, static_argnames=("configs_mean", "is_masked_loss"))
+def validation_step(
+    state: TrainState,
+    batch: Batch,
+    dropout_key,
+    configs_mean,
+    is_masked_loss=True
+):
+    step_scalar = jnp.ravel(state.step)[0]
+    dropout_val_key = jax.random.fold_in(key=dropout_key, data=step_scalar)
+
+    pred_mu, pred_alpha = state.apply_fn(
+        {"params": state.params},
+        batch["masked_spectra"],
+        batch["wave_number"],
+        batch["mask"],
+        training=False,
+        rngs={"dropout": dropout_val_key},
+    )
+    nan_inf_check(pred_mu)
+    nan_inf_check(pred_alpha)
+
+    gamma_nll_loss = _masked_gamma_nll_loss(
+        batch["spectra"],
+        pred_mu,
+        pred_alpha,
+        batch["mask"],
+        is_masked_loss=is_masked_loss,
+    )
+    mse = _masked_mse_loss(batch["spectra"], pred_mu, batch["mask"])
+
+    val_metrics = {
+        "val_gamma_nll_loss": gamma_nll_loss,
+        "MSE": mse,
+    }
+    return state, val_metrics
