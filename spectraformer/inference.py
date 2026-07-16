@@ -30,81 +30,22 @@ def predict(apply_fn, variables, batch: Batch, *apply_fn_args):
     res["predicted_difference"] = res["spectra"] - res["predicted_spectra"]
     return res
 
-def plot_results_train(predictions, step, epoch, current_model_tag):
-    fig = plt.figure(figsize=(12.5, 12.5), constrained_layout=True)
-    gs = fig.add_gridspec(2, 1, height_ratios=[1, 1], hspace=0.1)
+def plot_results_train(apply_fn, variables, batch: Batch, raman_shift):
+    pred_mu, pred_alpha = apply_fn(
+        variables,
+        batch["masked_spectra"],
+        batch["wave_number"],
+        batch["mask"],
+        training=False,
+    )
+    res = {k: np.squeeze(v) for k, v in batch.items()}
+    res["predicted_spectra"] = np.squeeze(pred_mu)
+    res["predicted_mu"] = np.squeeze(pred_mu)
+    res["predicted_alpha"] = np.squeeze(pred_alpha)
+    res["predicted_difference"] = res["spectra"] - res["predicted_spectra"]
+    res["raman_shift"] = raman_shift
+    return res
 
-    ax1 = fig.add_subplot(gs[0])
-    ax2 = fig.add_subplot(gs[1], sharex=ax1)
-
-    wave_number = _restore_wave_number(predictions["wave_number"])
-
-    # -------------------------
-    # Mask spans (union over all spectra)
-    # -------------------------
-    mask = np.asarray(predictions["mask"])
-    if mask.ndim > 1:
-        mask_any = np.any(mask, axis=tuple(range(mask.ndim - 1)))
-    else:
-        mask_any = mask.astype(bool)
-
-    mask_intervals = []
-    start = None
-    for i, v in enumerate(mask_any):
-        if v and start is None:
-            start = i
-        elif not v and start is not None:
-            mask_intervals.append((start, i - 1))
-            start = None
-    if start is not None:
-        mask_intervals.append((start, len(mask_any) - 1))
-
-    for s, e in mask_intervals:
-        for ax in (ax1, ax2):
-            ax.axvspan(
-                float(wave_number[s]), float(wave_number[e]),
-                color="gray", alpha=0.1, linewidth=0
-            )
-
-    # -------------------------
-    # Top panel: Data and Model output
-    # -------------------------
-    spectra = np.asarray(predictions["spectra"])
-    pred_spectra = np.asarray(predictions["predicted_spectra"])
-
-    if spectra.ndim > 1:
-        spectra = spectra.T
-    if pred_spectra.ndim > 1:
-        pred_spectra = pred_spectra.T
-
-    ax1.plot(wave_number, spectra, color="C0", lw=1.2, label="Data")
-    ax1.plot(wave_number, pred_spectra, color="C1", lw=1.2, label="Model output")
-
-    ax1.legend(frameon=True, fontsize='small')
-    ax1.set_ylabel("Intensity, a.u.")
-    ax1.xaxis.set_major_locator(ticker.MultipleLocator(300))
-    ax1.xaxis.set_minor_locator(ticker.MultipleLocator(50))
-
-    # -------------------------
-    # Bottom panel: Spectral subtraction (difference)
-    # -------------------------
-    difference = np.asarray(predictions["predicted_difference"])
-    if difference.ndim > 1:
-        difference = difference.T
-
-    ax2.plot(wave_number, difference, color="C2", lw=1.2, label="Spectral subtraction")
-    ax2.axhline(0, color='k', alpha=0.4)
-    ax2.legend(frameon=True, fontsize='small')
-    ax2.set_xlabel("Raman shift, cm$^{-1}$")
-    ax2.set_ylabel("Intensity, a.u.")
-    ax2.set_ylim(-0.08, 0.32)
-    ax2.xaxis.set_major_locator(ticker.MultipleLocator(300))
-    ax2.xaxis.set_minor_locator(ticker.MultipleLocator(50))
-
-    fig.suptitle(f'{current_model_tag}\nStep {step} -- Epoch {epoch}', y=0.975)
-    fig.align_ylabels([ax1, ax2])
-
-    return fig, ax1
 
 def plot_loss(dummy_wave_number, loss, step, epoch, current_model_tag, mask=None):
     fig, ax = plt.subplots(figsize=(12.5, 6.5), constrained_layout=True)
