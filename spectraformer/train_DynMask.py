@@ -82,7 +82,7 @@ def _masked_gamma_nll_loss(target, mu, alpha, mask, eps: float = 1e-6, is_masked
         + alpha * jnp.log(mu / alpha)
         + jax.scipy.special.gammaln(alpha)
     )
-    loss_mask = mask.astype(nll.dtype) if is_masked_loss else jnp.ones_like(nll)
+    loss_mask = _hidden_region_mask(mask).astype(nll.dtype) if is_masked_loss else jnp.ones_like(nll)
     masked_nll = nll * loss_mask
     masked_count = jnp.maximum(jnp.sum(loss_mask), 1.0)
     return jnp.sum(masked_nll) / masked_count
