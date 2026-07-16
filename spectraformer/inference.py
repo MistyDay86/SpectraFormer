@@ -16,7 +16,7 @@ def _restore_wave_number(wave_number):
 
 
 def predict(apply_fn, variables, batch: Batch, *apply_fn_args):
-    pred = apply_fn(
+    pred_mu, pred_alpha = apply_fn(
         variables,
         batch["masked_spectra"],
         batch["wave_number"],
@@ -24,7 +24,9 @@ def predict(apply_fn, variables, batch: Batch, *apply_fn_args):
         training=False,
     )
     res = {k: np.squeeze(v) for k, v in batch.items()}
-    res["predicted_spectra"] = np.squeeze(pred)
+    res["predicted_spectra"] = np.squeeze(pred_mu)
+    res["predicted_mu"] = np.squeeze(pred_mu)
+    res["predicted_alpha"] = np.squeeze(pred_alpha)
     res["predicted_difference"] = res["spectra"] - res["predicted_spectra"]
     return res
 

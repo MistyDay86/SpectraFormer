@@ -127,9 +127,9 @@ class SpectraFormer(nn.Module):
                 self.embedding_dim, self.num_heads, self.dropout_rate
             )(x, attn_mask, training=training)
         x = nn.LayerNorm()(x)
-        x = nn.Dense(1)(x)
-        x = jnp.exp(x)
-        return x
+        mu = jnp.exp(nn.Dense(1, name="MeanHead")(x))
+        alpha = jnp.exp(nn.Dense(1, name="DispersionHead")(x)) + 1e-3
+        return mu, alpha
 
 if __name__ == "__main__":
     test_LinearProjection()
