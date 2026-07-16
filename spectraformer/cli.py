@@ -204,7 +204,7 @@ def main(args: InferenceArgs) -> None:
             data_vars={
                 "spectra": (("sample", "wave_number"), spectra),
                 "masked_spectra": (("sample", "wave_number"), masked_spectra),
-                "mask": (("sample", "wave_number"), (np.asarray(mask).squeeze() if np.asarray(mask).squeeze().ndim == 2 else np.broadcast_to(np.asarray(mask).squeeze()[None, :], np.asarray(spectra).squeeze().shape))),
+                "mask": (("sample", "wave_number"), (np.asarray(mask).squeeze() if np.asarray(mask).squeeze().shape == np.asarray(spectra).squeeze().shape else (np.asarray(masked_spectra).squeeze() != float(configs.get("default_mask_value", -1))))),
                 "predicted_spectra": (("sample", "wave_number"), predicted_spectra),
                 "predicted_mu": (("sample", "wave_number"), mu),
                 "predicted_alpha": (("sample", "wave_number"), alpha),
