@@ -240,3 +240,11 @@ node_modules/
 # VitePress
 docs/.vitepress/dist/
 docs/.vitepress/cache/
+
+# Local data and generated outputs
+inference_outputs/
+corrected_nc/
+hf_cache/
+*.log
+*.nc
+*.csv
