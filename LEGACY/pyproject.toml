@@ -1,0 +1,89 @@
+[project]
+name = "spectraformer"
+version = "1.0.0"
+description = "Transformer-based Raman spectra unmixing for graphene buffer layers on SiC substrates"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11,<3.12"
+authors = [
+    { name = "Pietro Novelli" }
+]
+keywords = ["raman", "spectroscopy", "unmixing", "transformer", "jax", "graphene"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+
+dependencies = [
+    # JAX ecosystem
+    # For GPU, install with: uv sync --extra cuda12
+    "jax>=0.4.26",
+    "flax>=0.8",
+    "chex>=0.1.86",
+    "optax>=0.2",
+    "orbax-checkpoint",
+    # Data handling
+    "xarray[io]",
+    "netcdf4",
+    "numpy>=1.26,<3",
+    # Configuration
+    "ml_confs>=0.0.4",
+    # CLI
+    "tyro",
+    # Visualization (optional but included for convenience)
+    "matplotlib",
+    "loguru>=0.7.3",
+    "streamlit>=1.53.1",
+    "plotly>=6.5.2",
+]
+
+[project.optional-dependencies]
+# GPU support - CUDA 12
+cuda12 = [
+    "jax[cuda12]>=0.4.26",
+]
+
+# Training dependencies (not needed for inference-only)
+train = [
+    "tensorboardX",
+    "gpustat",
+]
+
+# Dashboard
+dashboard = [
+    "streamlit>=1.31.0",
+    "gradio>=5.0.0",
+]
+
+# Development
+dev = [
+    "ipykernel",
+    "pytest",
+]
+
+# All optional dependencies
+all = [
+    "spectraformer[cuda12,train,dashboard,dev]",
+]
+
+[project.scripts]
+spectraformer-unmix = "spectraformer.cli:main"
+
+[project.urls]
+Repository = "https://github.com/pietronvll/SpectraFormer"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["spectraformer"]
+
+[tool.uv]
+# Pin exact versions when generating lock file
+# Run: uv lock
+# This ensures reproducibility across environments

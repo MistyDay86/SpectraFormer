@@ -1,0 +1,9 @@
+flax
+chex
+ml_confs==0.0.4
+streamlit==1.31.1
+xarray[io]==2023.11.0
+ipykernel
+tensorboardX
+matplotlib
+gpustat

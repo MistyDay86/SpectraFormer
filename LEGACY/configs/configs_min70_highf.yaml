@@ -1,0 +1,49 @@
+tag: "spectraformer:min70_highf"
+
+#                  Min:             Base:       Micro:
+# embedding_dim:     64               256           64
+# num_heads:          8                16            2
+# num_layers:         2                 8            2
+
+# Min:
+embedding_dim: 64
+num_heads: 8
+num_layers: 2
+
+# # Base:
+# embedding_dim: 256
+# num_heads: 16
+# num_layers: 8
+
+learning_rate: 1e-3
+learning_rate_decay: "Multiple cosine decay cycles" # one from the list ["Multiple cosine decay cycles","Constant"]
+warmup_coeff: 1 # multiplier before peak_value
+warmup_steps: 2250
+decay_steps: 4500
+
+num_cycles: 15 # =67500 steps with given 4500 step/cycle
+decline_coeff: 0.9
+
+num_epochs: 350 #this is for a single run from (restored_epoch + 1) to (restored_epoch + configs.num_epochs) included
+batch_size: 24 #should be divisible by 1, 2, 3, and 4 -- multiplication of 12.
+dropout_rate: 0.2
+root_rng_seed: 0
+
+train_dataset:  "SiC_19x10x3" #"SiC_100x10"
+
+log_every_epochs: 1
+
+masked_interval_starts:   [   -1, 2500]
+masked_interval_ends:     [ 1800, 9999]
+random_mask: False
+
+mean: 'Arithmetic' # one from the list ['Arithmetic', 'Geometric']
+loss_fn: 'CorrGamma' # one from the list ['MSE', 'CorrGamma']
+
+# Early stop
+is_early_stop: False
+early_stop_min_delta: 1e-4
+early_stop_patience: 5 # it's also in CheckpointManagerOptions: max_to_keep = early_stop_patience + 1
+
+# Filtering data before preprocessing?
+is_filter: False

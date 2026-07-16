@@ -1,0 +1,6 @@
+.vp-doc img {
+  max-width: 80%;
+  display: block;
+  margin: 1.5rem auto;
+  border-radius: 8px;
+}

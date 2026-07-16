@@ -1,0 +1,242 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Project-specific files
+model_comparison.ipynb
+logbook.md
+
+spectraformer/baselines.py
+
+# clean all the local checkpoints from git tracking
+checkpoints/*
+# clean all the other saved models
+saved_models/checkpoints/*
+# keep the spectraformer:min70_highf model
+!saved_models/checkpoints/spectraformer:min70_highf/
+# clean all the steps inside the model folder
+saved_models/checkpoints/spectraformer:min70_highf/*
+# but keep the last step 59925
+!saved_models/checkpoints/spectraformer:min70_highf/59925/
+# and its content
+!saved_models/checkpoints/spectraformer:min70_highf/59925/*
+# same for metadata
+!saved_models/checkpoints/spectraformer:min70_highf/metadata/
+!saved_models/checkpoints/spectraformer:min70_highf/metadata/*
+
+# min79
+!saved_models/checkpoints/spectraformer:min79_highf/
+!saved_models/checkpoints/spectraformer:min79_highf/*
+!saved_models/checkpoints/spectraformer:min79_highf/139200/
+!saved_models/checkpoints/spectraformer:min79_highf/139200/*
+!saved_models/checkpoints/spectraformer:min79_highf/metadata/
+!saved_models/checkpoints/spectraformer:min79_highf/metadata/*
+
+
+configs/*
+!configs/configs_min70_highf.yaml
+!configs/configs_min72_highf.yaml
+!configs/configs_min79_highf.yaml
+
+
+# no need to have these at the cluster
+data/*
+!data/examples/
+!data/examples/*
+# # an example datafile for model initialization
+# !data/SiC_19x10x3.nc 
+
+# # the following datafiles were used for figure 1 generation
+
+# # number 1.1
+# !data/parsed_data_spatial/
+# data/parsed_data_spatial/*
+# !data/parsed_data_spatial/SiC-high-f/
+# data/parsed_data_spatial/SiC-high-f/*
+# !data/parsed_data_spatial/SiC-high-f/6H_spectra_20250423/
+# data/parsed_data_spatial/SiC-high-f/6H_spectra_20250423/*
+# !data/parsed_data_spatial/SiC-high-f/6H_spectra_20250423/5s_5p/
+# data/parsed_data_spatial/SiC-high-f/6H_spectra_20250423/5s_5p/*
+# !data/parsed_data_spatial/SiC-high-f/6H_spectra_20250423/5s_5p/6H_spectra_20250423_15x15_5s_5p_1.nc
+# # number 1.2
+# !data/parsed_data_spatial/buffer+graphene/
+# data/parsed_data_spatial/buffer+graphene/*
+# !data/parsed_data_spatial/buffer+graphene/RUN3REC2_Buffer_20241011_1/
+# data/parsed_data_spatial/buffer+graphene/RUN3REC2_Buffer_20241011_1/*
+# !data/parsed_data_spatial/buffer+graphene/RUN3REC2_Buffer_20241011_1/5_5_1/
+# data/parsed_data_spatial/buffer+graphene/RUN3REC2_Buffer_20241011_1/5_5_1/*
+# !data/parsed_data_spatial/buffer+graphene/RUN3REC2_Buffer_20241011_1/5_5_1/RUN3REC2_Buffer_20241011_1_15x15_pt4.nc
+# # number 1.3
+# !data/parsed_data_spatial/buffer+graphene/main/
+# data/parsed_data_spatial/buffer+graphene/main/*
+# !data/parsed_data_spatial/buffer+graphene/main/main_8x8_Mixed_8x8.nc
+
+# # -//- for figure 3 generation
+# # number 3.1 - same as number 1.3
+# !data/unmixed_spatial/
+# data/unmixed_spatial/*
+# !data/unmixed_spatial/min70_highf/
+# data/unmixed_spatial/min70_highf/*
+# !data/unmixed_spatial/min70_highf/buffer+graphene/
+# data/unmixed_spatial/min70_highf/buffer+graphene/*
+# !data/unmixed_spatial/min70_highf/buffer+graphene/main/
+# data/unmixed_spatial/min70_highf/buffer+graphene/main/*
+# !data/unmixed_spatial/min70_highf/buffer+graphene/main/unmixed_by_min70_highf_main_8x8_Mixed_8x8.nc
+# # number 3.2
+# !data/unmixed_spatial/min70_highf/buffer+graphene/RUN3REC2_Buffer_20241011_1/
+# data/unmixed_spatial/min70_highf/buffer+graphene/RUN3REC2_Buffer_20241011_1/*
+# !data/unmixed_spatial/min70_highf/buffer+graphene/RUN3REC2_Buffer_20241011_1/5_5_1/
+# data/unmixed_spatial/min70_highf/buffer+graphene/RUN3REC2_Buffer_20241011_1/5_5_1/*
+# !data/unmixed_spatial/min70_highf/buffer+graphene/RUN3REC2_Buffer_20241011_1/5_5_1/unmixed_by_min70_highf_RUN3REC2_Buffer_20241011_1_11x11_pt1.nc
+
+
+logs/*
+!logs/spectraformer:min70_highf/
+!logs/spectraformer:min70_highf/*
+
+
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# Translations
+*.mo
+*.pot
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+.python-version
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+.conda
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ML/Data Science
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+wandb/
+mlruns/
+lightning_logs/
+*.ckpt
+*.pt
+*.pth
+
+# JAX/Flax specific
+orbax/
+
+# Project-specific files
+# *.png
+*.jpg
+*.jpeg
+*.tif
+*.bmp
+*.gif
+*.pdf
+*.svg
+*temp*/
+
+.conda
+
+# User-specific files
+*.rsuser
+
+# Visual Studio
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.userprefs
+*.code-workspace
+[Dd]ebug/
+[Rr]elease/
+[Bb]in/
+[Oo]bj/
+
+# Node
+node_modules/
+
+# VitePress
+docs/.vitepress/dist/
+docs/.vitepress/cache/
