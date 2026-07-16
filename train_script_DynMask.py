@@ -413,7 +413,7 @@ def main(args: TrainArgs) -> None:
         batch=final_batch,
         raman_shift=val_parts[0][2].wave_number.values,
     )
-    fig = plot_loss(res, is_masked_loss=is_masked_loss)
+    fig = plot_loss(res)
     metric_writer.add_figure("final_loss_on_example", fig)
     metric_writer.close()
     ckpt_manager.close()
