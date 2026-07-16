@@ -390,33 +390,9 @@ def main(args: TrainArgs) -> None:
 
         logger.info(f"Epoch time: {time.perf_counter() - epoch_start:.1f}s")
 
-    final_batch = next(
-        batch_sampler(
-            val_parts[0][2],
-            mask_windows_for_loader,
-            batch_size=1,
-            shuffle=False,
-            drop_last=True,
-            default_mask_value=getattr(configs, "default_mask_value", -1),
-        )
-    )
-    final_batch = apply_dynamic_mask(
-        final_batch,
-        jnp.asarray(val_parts[0][2]["wave_number"].values),
-        jax.random.PRNGKey(configs.root_rng_seed),
-        0,
-    )
-
-    res = plot_results_train(
-        apply_fn=state.apply_fn,
-        variables={"params": state.params},
-        batch=final_batch,
-        raman_shift=val_parts[0][2].wave_number.values,
-    )
-    fig = plot_loss(res)
-    metric_writer.add_figure("final_loss_on_example", fig)
     metric_writer.close()
     ckpt_manager.close()
+    logger.info("Training completed successfully.")
 
 
 if __name__ == "__main__":
