@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 CHECKPOINT = ROOT / "pretrained_checkpoints/min70_highf_filelevel_gammanll_best/84366/default"
 CONFIG_PATH = ROOT / "configs/configs_min70_highf_filelevel_gammanll.yaml"
-MODE_GITHUB = "GitHub CLI — dynamic masking"
+MODE_GITHUB = "Standard inference — dynamic masking"
 MODE_EXTENDED = "Extended context — 1200–1300 and 1660–2500 cm⁻¹"
 MAX_SPECTRA = 1000
 MAX_POINTS = 2048
@@ -215,19 +215,18 @@ def main():
     st.set_page_config(page_title="SpectraFormer", page_icon="🔬", layout="wide")
     st.title("SpectraFormer")
     st.write("SpectraFormer estimates the Raman contribution of a silicon carbide (SiC) substrate from the observed parts of a measured spectrum. Subtracting this estimate reveals the remaining signal, including possible graphene or buffer-layer features, noise, and reconstruction error.")
-    st.markdown("Upload your original spectrum or Raman map; preprocessing runs automatically. This release accepts high-frequency data covering **1300–2800 cm⁻¹**, within **800–3300 cm⁻¹**. [Source code and model](https://github.com/MistyDay86/SpectraFormer/tree/gammanll-filelevel-pipeline).")
+    st.markdown("Upload an unprocessed spectrum or Raman map for automatic preprocessing and inference. Input spectra must cover **1300–2800 cm⁻¹**, with all Raman shifts within **800–3300 cm⁻¹**. [Source code and model](https://github.com/MistyDay86/SpectraFormer/tree/gammanll-filelevel-pipeline).")
     with st.expander("Data preparation and preprocessing"):
         st.markdown("Text files: use Raman shift (cm⁻¹) and intensity as the last two numeric columns, optionally preceded by spatial coordinates. Use decimal points and a common spectral grid across a map. NetCDF inputs need a `wave_number` dimension. No manual normalization is required.")
-        st.markdown("The original pipeline removes spikes using Whitaker–Hayes (kernel 3, threshold 8), normalizes each spectrum to [0,1], and excludes map spectra whose maximum deviation from the pointwise median is ≥ 0.15. Raman shifts are transformed as (ν−2000)/800. No Savitzky–Golay smoothing or separate baseline subtraction is applied. Output intensity is normalized.")
-    st.caption("GammaNLL · file-level checkpoint 84366 · mean subtraction (τ = 0)")
-    st.info("For high-frequency graphene/buffer-layer spectra on SiC. Results use normalized intensity; residuals include noise and reconstruction error. Support for other acquisition conditions has not been established.")
+        st.markdown("Preprocessing removes spikes using Whitaker–Hayes (kernel 3, threshold 8), normalizes each spectrum to [0,1], and excludes map spectra whose maximum deviation from the pointwise median is ≥ 0.15. Raman shifts are transformed as (ν−2000)/800. No Savitzky–Golay smoothing or separate baseline subtraction is applied. Output intensity is normalized.")
+    st.caption("Residual = preprocessed spectrum − estimated SiC contribution. All output intensities are normalized.")
     upload = st.file_uploader("Upload the original Raman file", type=["txt", "csv", "tsv", "nc"])
     st.caption("Text: Raman shift and intensity in the last two columns; optional spatial coordinates before them. Decimal points required. Maximum 25 MB, 1000 spectra, 2048 spectral points.")
     mode = st.radio("Inference mode", [MODE_GITHUB, MODE_EXTENDED])
     if mode == MODE_GITHUB:
-        st.caption("Matches the updated CLI mask generation, seed and logical batch assignment. Observed regions vary across batches. Mean subtraction only (τ = 0).")
+        st.caption("Uses the dynamic masking procedure defined in the model's reference inference pipeline. The observed spectral regions can vary between groups of spectra.")
     else:
-        st.caption("Experimental alternative proposed by Dmitriy: observe 1200–1300 and 1660–2500 cm⁻¹. Same model weights, no retraining. This changes the input context and therefore the predictions.")
+        st.caption("Uses fixed observed windows at 1200–1300 and 1660–2500 cm⁻¹ with the same pretrained model. Predictions may differ from standard inference because the observed spectral regions differ. Comparative performance has not been established.")
     if upload is None:
         return
     import hashlib
@@ -279,8 +278,8 @@ def main():
                           fillcolor="#64748b", opacity=0.08, line_width=0)
     fig.update_layout(xaxis_title="Raman shift (cm⁻¹)", yaxis_title="Normalized intensity", height=520)
     st.plotly_chart(fig, use_container_width=True)
-    st.caption("Shaded regions are observed by the model. With a map median, shading is omitted because GitHub CLI masks can differ between batches. Negative residuals are preserved.")
-    st.subheader("Residual only")
+    st.caption("Shaded regions indicate the spectral data provided to the model. Shading is omitted for the median across spectra because observed regions may differ. Negative residual values are retained.")
+    st.subheader("Residual spectrum")
     residual = np.median(result["residual"], axis=0) if summary else result["residual"][selection]
     residual_fig = go.Figure(go.Scatter(x=result["wave"], y=residual, name="Residual", line={"color": "#078a77"}))
     residual_fig.add_hline(y=0, line_dash="dot", line_color="#64748b")
