@@ -18,6 +18,9 @@ import xarray as xr
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 CHECKPOINT = ROOT / "pretrained_checkpoints/min70_highf_filelevel_gammanll_best/84366/default"
+CONFIG_PATH = ROOT / "configs/configs_min70_highf_filelevel_gammanll.yaml"
+MODE_GITHUB = "GitHub CLI — dynamic masking"
+MODE_EXTENDED = "Extended context — 1200–1300 and 1660–2500 cm⁻¹"
 MAX_SPECTRA = 1000
 MAX_POINTS = 2048
 
@@ -88,24 +91,8 @@ def read_input(content, name):
         raise ValueError("Incomplete spectra or non-finite intensities. All spectra need the same Raman grid.")
     if wave.min() > 1300 or wave.max() < 2800 or wave.min() < 800 or wave.max() > 3300:
         raise ValueError("This release accepts high-frequency SiC spectra covering 1300–2800 cm⁻¹, within 800–3300 cm⁻¹.")
-    visible = (wave >= 1800) & (wave <= 2500)
-    if visible.sum() < 32:
-        raise ValueError("At least 32 observed points are required between 1800 and 2500 cm⁻¹.")
     return wave, counts, labels
 
-
-def preprocess(counts):
-    from spectraformer.input_pipeline import whitaker_hayes_spectrum
-    cleaned = np.stack([whitaker_hayes_spectrum(row, 3, 8) for row in counts])
-    minimum = cleaned.min(axis=1, keepdims=True)
-    scale = cleaned.max(axis=1, keepdims=True) - minimum
-    if not np.isfinite(cleaned).all() or np.any(scale <= 0):
-        raise ValueError("A spectrum is constant or became invalid during spike removal.")
-    normalized = (cleaned - minimum) / scale
-    keep = np.max(np.abs(normalized - np.median(normalized, axis=0)), axis=1) < 0.15
-    if not keep.any():
-        raise ValueError("All spectra were excluded by the model's map-level outlier filter.")
-    return normalized[keep].astype(np.float32), keep
 
 
 @st.cache_resource
@@ -127,29 +114,75 @@ def load_engine():
     return predict, threading.Lock()
 
 
-def analyze(wave, counts, labels):
+def analyze(wave, counts, labels, mode=MODE_GITHUB):
     import jax
     import jax.numpy as jnp
-    normalized, keep = preprocess(counts)
-    visible = (wave >= 1800) & (wave <= 2500)
-    masked = np.where(visible[None, :], normalized, -1.0).astype(np.float32)
+    import yaml
+    from spectraformer.input_pipeline import batch_sampler, preprocess_dataset
+    from spectraformer.train_DynMask import _build_dynamic_mask_windows_np, _apply_mask_to_batch
+    config = yaml.safe_load(CONFIG_PATH.read_text())
+    seed = int(config.get("root_rng_seed", 0))
+    data = xr.DataArray(counts, dims=("position", "wave_number"),
+                        coords={"position": np.arange(len(counts)), "wave_number": wave})
+    data = preprocess_dataset(data, is_filter=False, option="whitaker_hayes")
+    kept = np.asarray([int(v[0]) for v in data.spectra.values])
+    if not len(kept):
+        raise ValueError("All spectra were excluded by the model's outlier filter.")
+    order = np.arange(len(kept))
+    np.random.RandomState(seed).shuffle(order)
+    data = data.isel(spectra=order)
+    kept = kept[order]
+    static_windows = list(zip(config["masked_interval_starts"], config["masked_interval_ends"]))
+    loader_windows = [] if config.get("dynamic_mask", False) else static_windows
     predict, lock = load_engine()
-    means, shapes = [], []
+    means, shapes, inputs, masks, masked_inputs = [], [], [], [], []
+    mask_windows_used = []
     with lock:
-        for spectrum in masked:
-            mu, alpha = predict(jnp.asarray(spectrum[None, :, None]),
-                                jnp.asarray(((wave - 2000) / 800).astype(np.float32)[:, None]),
-                                jnp.asarray(visible))
-            mu, alpha = jax.device_get((mu, alpha))
-            means.append(np.asarray(mu)[0, :, 0])
-            shapes.append(np.asarray(alpha)[0, :, 0])
-    mu, alpha = np.stack(means), np.stack(shapes)
+        for batch_index, batch in enumerate(batch_sampler(
+                data, loader_windows, batch_size=int(config["batch_size"]),
+                shuffle=False, drop_last=False, default_mask_value=config.get("default_mask_value", -1))):
+            if mode == MODE_EXTENDED:
+                visible = ((wave >= 1200) & (wave <= 1300)) | ((wave >= 1660) & (wave <= 2500))
+                if visible.sum() < 32:
+                    raise ValueError("Insufficient observed points for the extended-context mode.")
+                batch["mask"] = jnp.asarray(visible)
+                batch["masked_spectra"] = jnp.where(batch["mask"][None, :, None], batch["spectra"],
+                                                    config.get("default_mask_value", -1))
+                windows = [[1200, 1300], [1660, 2500]]
+            elif config.get("dynamic_mask", False):
+                # CLI receives the Raman axis through JAX, normally float32.
+                raw_axis = jnp.asarray(data.wave_number.values)
+                windows = _build_dynamic_mask_windows_np(
+                    raw_axis, np.random.default_rng(seed + batch_index),
+                    chunk_size=config.get("mask_chunk_size", 200),
+                    min_chunks=config.get("mask_chunk_min", 2), max_chunks=config.get("mask_chunk_max", 6))
+                batch = _apply_mask_to_batch(batch, raw_axis, windows,
+                                             default_mask_value=config.get("default_mask_value", -1))
+            else:
+                windows = static_windows
+            visible = np.asarray(batch["mask"], dtype=bool)
+            if not visible.any():
+                raise ValueError("The selected mask leaves no observed points.")
+            # Keep CLI batch membership and masks; evaluate one spectrum at a time on CPU.
+            # This avoids allocating 24 full attention matrices simultaneously.
+            for i in range(batch["spectra"].shape[0]):
+                mu, alpha = predict(batch["masked_spectra"][i:i+1], batch["wave_number"], batch["mask"])
+                mu, alpha = jax.device_get((mu, alpha))
+                means.append(np.asarray(mu)[0, :, 0])
+                shapes.append(np.asarray(alpha)[0, :, 0])
+                masks.append(visible)
+                inputs.append(np.asarray(batch["spectra"])[i, :, 0])
+                masked_inputs.append(np.asarray(batch["masked_spectra"])[i, :, 0])
+                mask_windows_used.append([[float(a), float(b)] for a,b in windows])
+    mu, alpha, normalized = np.stack(means), np.stack(shapes), np.stack(inputs)
     if not np.isfinite(mu).all() or not np.isfinite(alpha).all():
         raise ValueError("The model produced non-finite predictions for this input.")
     return {"wave": wave, "spectra": normalized, "mu": mu, "alpha": alpha,
-            "residual": normalized - mu, "visible": visible,
-            "labels": [label for label, selected in zip(labels, keep) if selected],
-            "excluded": [label for label, selected in zip(labels, keep) if not selected]}
+            "residual": normalized - mu, "visible": np.stack(masks),
+            "masked_spectra": np.stack(masked_inputs), "mode": mode,
+            "mask_windows": mask_windows_used,
+            "labels": [labels[i] for i in kept],
+            "excluded": [label for i,label in enumerate(labels) if i not in set(kept)]}
 
 
 def exports(result):
@@ -162,16 +195,17 @@ def exports(result):
     for i, label in enumerate(result["labels"]):
         for j, shift in enumerate(wave):
             writer.writerow([i, label, shift, result["spectra"][i,j], result["mu"][i,j],
-                             result["residual"][i,j], result["alpha"][i,j], int(result["visible"][j])])
+                             result["residual"][i,j], result["alpha"][i,j], int(result["visible"][i,j])])
     dataset = xr.Dataset({name: (("sample", "wave_number"), result[key]) for name, key in
-                          [("spectra", "spectra"), ("predicted_mu", "mu"),
+                          [("spectra", "spectra"), ("masked_spectra", "masked_spectra"), ("predicted_mu", "mu"),
                            ("predicted_alpha", "alpha"), ("predicted_difference", "residual")]},
                          coords={"sample": np.arange(len(result["labels"])), "wave_number": wave})
     dataset["coordinate"] = ("sample", result["labels"])
-    dataset["observed_mask"] = ("wave_number", result["visible"].astype(np.int8))
+    dataset["observed_mask"] = (("sample", "wave_number"), result["visible"].astype(np.int8))
     dataset.wave_number.attrs["units"] = "cm^-1"
     dataset.attrs.update(checkpoint="min70_highf_filelevel_gammanll_best/84366", tau=0.0,
-                         intensity_units="normalized", mask="hidden below 1800 and above 2500 cm^-1",
+                         intensity_units="normalized", inference_mode=result["mode"],
+                         mask_windows=json.dumps(result["mask_windows"]),
                          excluded_coordinates=json.dumps(result["excluded"]),
                          preprocessing="Whitaker-Hayes kernel=3 threshold=8; per-spectrum min-max; map filter threshold=0.15")
     return output.getvalue().encode(), dataset.to_netcdf(engine="scipy")
@@ -180,16 +214,25 @@ def exports(result):
 def main():
     st.set_page_config(page_title="SpectraFormer", page_icon="🔬", layout="wide")
     st.title("SpectraFormer")
-    st.write("Reconstruct the SiC Raman background and inspect the remaining signal.")
+    st.write("SpectraFormer estimates the Raman contribution of a silicon carbide (SiC) substrate from the observed parts of a measured spectrum. Subtracting this estimate reveals the remaining signal, including possible graphene or buffer-layer features, noise, and reconstruction error.")
+    st.markdown("Upload your original spectrum or Raman map; preprocessing runs automatically. This release accepts high-frequency data covering **1300–2800 cm⁻¹**, within **800–3300 cm⁻¹**. [Source code and model](https://github.com/MistyDay86/SpectraFormer/tree/gammanll-filelevel-pipeline).")
+    with st.expander("Data preparation and preprocessing"):
+        st.markdown("Text files: use Raman shift (cm⁻¹) and intensity as the last two numeric columns, optionally preceded by spatial coordinates. Use decimal points and a common spectral grid across a map. NetCDF inputs need a `wave_number` dimension. No manual normalization is required.")
+        st.markdown("The original pipeline removes spikes using Whitaker–Hayes (kernel 3, threshold 8), normalizes each spectrum to [0,1], and excludes map spectra whose maximum deviation from the pointwise median is ≥ 0.15. Raman shifts are transformed as (ν−2000)/800. No Savitzky–Golay smoothing or separate baseline subtraction is applied. Output intensity is normalized.")
     st.caption("GammaNLL · file-level checkpoint 84366 · mean subtraction (τ = 0)")
     st.info("For high-frequency graphene/buffer-layer spectra on SiC. Results use normalized intensity; residuals include noise and reconstruction error. Support for other acquisition conditions has not been established.")
     upload = st.file_uploader("Upload the original Raman file", type=["txt", "csv", "tsv", "nc"])
     st.caption("Text: Raman shift and intensity in the last two columns; optional spatial coordinates before them. Decimal points required. Maximum 25 MB, 1000 spectra, 2048 spectral points.")
+    mode = st.radio("Inference mode", [MODE_GITHUB, MODE_EXTENDED])
+    if mode == MODE_GITHUB:
+        st.caption("Matches the updated CLI mask generation, seed and logical batch assignment. Observed regions vary across batches. Mean subtraction only (τ = 0).")
+    else:
+        st.caption("Experimental alternative proposed by Dmitriy: observe 1200–1300 and 1660–2500 cm⁻¹. Same model weights, no retraining. This changes the input context and therefore the predictions.")
     if upload is None:
         return
     import hashlib
     content = upload.getvalue()
-    signature = hashlib.sha256(content).hexdigest()
+    signature = hashlib.sha256(content + mode.encode()).hexdigest()
     if st.session_state.get("signature") != signature:
         for key in ["result", "downloads"]:
             st.session_state.pop(key, None)
@@ -200,6 +243,8 @@ def main():
         st.error(str(exc))
         return
     st.write(f"{len(labels)} spectra · {len(wave)} points · {wave[0]:.1f}–{wave[-1]:.1f} cm⁻¹")
+    if mode == MODE_EXTENDED and wave.min() > 1200:
+        st.warning(f"The input starts at {wave.min():.1f} cm⁻¹; the 1200–1300 window is only partially available or absent. Missing data are not extrapolated.")
     with st.expander("Preview original spectrum"):
         raw = go.Figure(go.Scatter(x=wave, y=counts[0], name="Original intensity"))
         raw.update_layout(xaxis_title="Raman shift (cm⁻¹)", yaxis_title="Original intensity")
@@ -207,7 +252,7 @@ def main():
     if st.button("Analyze", type="primary"):
         try:
             with st.spinner("Preprocessing and reconstructing the SiC background…"):
-                result = analyze(wave, counts, labels)
+                result = analyze(wave, counts, labels, mode)
                 downloads = exports(result)
             st.session_state.result = result
             st.session_state.downloads = downloads
@@ -226,11 +271,21 @@ def main():
                              ("residual", "Residual", "#078a77")]:
         y = np.median(result[key], axis=0) if summary else result[key][selection]
         fig.add_trace(go.Scatter(x=result["wave"], y=y, name=name, line={"color": color}))
-    fig.add_vrect(x0=1800, x1=2500, fillcolor="#64748b", opacity=0.08, line_width=0,
-                  annotation_text="Observed context")
+    visible = result["visible"][selection]
+    if not summary:
+        edges = np.flatnonzero(np.diff(np.r_[False, visible, False]))
+        for start, end in zip(edges[::2], edges[1::2]):
+            fig.add_vrect(x0=result["wave"][start], x1=result["wave"][end-1],
+                          fillcolor="#64748b", opacity=0.08, line_width=0)
     fig.update_layout(xaxis_title="Raman shift (cm⁻¹)", yaxis_title="Normalized intensity", height=520)
     st.plotly_chart(fig, use_container_width=True)
-    st.caption("Shaded region: observed context. The SiC signal in the surrounding regions is reconstructed from this context. Negative residuals are preserved.")
+    st.caption("Shaded regions are observed by the model. With a map median, shading is omitted because GitHub CLI masks can differ between batches. Negative residuals are preserved.")
+    st.subheader("Residual only")
+    residual = np.median(result["residual"], axis=0) if summary else result["residual"][selection]
+    residual_fig = go.Figure(go.Scatter(x=result["wave"], y=residual, name="Residual", line={"color": "#078a77"}))
+    residual_fig.add_hline(y=0, line_dash="dot", line_color="#64748b")
+    residual_fig.update_layout(xaxis_title="Raman shift (cm⁻¹)", yaxis_title="Normalized residual", height=400)
+    st.plotly_chart(residual_fig, use_container_width=True)
     csv_bytes, nc_bytes = st.session_state.downloads
     left, right = st.columns(2)
     left.download_button("Download CSV", csv_bytes, "spectraformer_results.csv", "text/csv")
@@ -242,3 +297,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
