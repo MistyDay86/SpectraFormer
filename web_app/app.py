@@ -19,8 +19,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 CHECKPOINT = ROOT / "pretrained_checkpoints/min70_highf_filelevel_gammanll_best/84366/default"
 CONFIG_PATH = ROOT / "configs/configs_min70_highf_filelevel_gammanll.yaml"
-MODE_STANDARD = "Standard context â€” 1800â€“2500 cmâ»Â¹"
-MODE_EXTENDED = "Extended context â€” 1200â€“1300, 1660â€“2500 and 2800â€“2900 cmâ»Â¹"
+MODE_STANDARD = "Standard context - 1800-2500 cm^-1"
+MODE_EXTENDED = "Extended context - 1200-1300, 1660-2500 and 2800-2900 cm^-1"
 OBSERVED_WINDOWS = {
     MODE_STANDARD: [(1800, 2500)],
     MODE_EXTENDED: [(1200, 1300), (1660, 2500), (2800, 2900)],
@@ -94,7 +94,7 @@ def read_input(content, name):
     if not np.isfinite(counts).all():
         raise ValueError("Incomplete spectra or non-finite intensities. All spectra need the same Raman grid.")
     if wave.min() > 1300 or wave.max() < 2800 or wave.min() < 800 or wave.max() > 3300:
-        raise ValueError("This release accepts high-frequency SiC spectra covering 1300â€“2800 cmâ»Â¹, within 800â€“3300 cmâ»Â¹.")
+        raise ValueError("This release accepts high-frequency SiC spectra covering 1300-2800 cm^-1, within 800-3300 cm^-1.")
     return wave, counts, labels
 
 
@@ -217,21 +217,21 @@ def exports(result):
 
 
 def main():
-    st.set_page_config(page_title="SpectraFormer", page_icon="ðŸ”¬", layout="wide")
+    st.set_page_config(page_title="SpectraFormer", layout="wide")
     st.title("SpectraFormer")
     st.write("SpectraFormer estimates the Raman contribution of a silicon carbide (SiC) substrate from the observed parts of a measured spectrum. Subtracting this estimate reveals the remaining signal, including possible graphene or buffer-layer features, noise, and reconstruction error.")
-    st.markdown("Upload an unprocessed spectrum or Raman map for automatic preprocessing and inference. Input spectra must cover **1300â€“2800 cmâ»Â¹**, with all Raman shifts within **800â€“3300 cmâ»Â¹**. [Source code and model](https://github.com/MistyDay86/SpectraFormer/tree/gammanll-filelevel-pipeline).")
+    st.markdown("Upload an unprocessed spectrum or Raman map for automatic preprocessing and inference. Input spectra must cover **1300-2800 cm^-1**, with all Raman shifts within **800-3300 cm^-1**. [Source code and model](https://github.com/MistyDay86/SpectraFormer/tree/gammanll-filelevel-pipeline).")
     with st.expander("Data preparation and preprocessing"):
-        st.markdown("Text files: use Raman shift (cmâ»Â¹) and intensity as the last two numeric columns, optionally preceded by spatial coordinates. Use decimal points and a common spectral grid across a map. NetCDF inputs need a `wave_number` dimension. No manual normalization is required.")
-        st.markdown("Preprocessing removes spikes using Whitakerâ€“Hayes (kernel 3, threshold 8), normalizes each spectrum to [0,1], and excludes map spectra whose maximum deviation from the pointwise median is â‰¥ 0.15. Raman shifts are transformed as (Î½âˆ’2000)/800. Output intensity is normalized.")
-    st.caption("Residual = preprocessed spectrum âˆ’ estimated SiC contribution. All output intensities are normalized.")
+        st.markdown("Text files: use Raman shift (cm^-1) and intensity as the last two numeric columns, optionally preceded by spatial coordinates. Use decimal points and a common spectral grid across a map. NetCDF inputs need a `wave_number` dimension. No manual normalization is required.")
+        st.markdown("Preprocessing removes spikes using Whitaker-Hayes (kernel 3, threshold 8), normalizes each spectrum to [0,1], and excludes map spectra whose maximum deviation from the pointwise median is >= 0.15. Raman shifts are transformed as (Raman shift-2000)/800. Output intensity is normalized.")
+    st.caption("Residual = preprocessed spectrum - estimated SiC contribution. All output intensities are normalized.")
     upload = st.file_uploader("Upload the original Raman file", type=["txt", "csv", "tsv", "nc"])
     st.caption("Text: Raman shift and intensity in the last two columns; optional spatial coordinates before them. Decimal points required. Maximum 25 MB, 1000 spectra, 2048 spectral points.")
     mode = st.radio("Inference mode", [MODE_STANDARD, MODE_EXTENDED])
     if mode == MODE_STANDARD:
-        st.caption("Uses a fixed observed window at 1800â€“2500 cmâ»Â¹ for every spectrum.")
+        st.caption("Uses a fixed observed window at 1800-2500 cm^-1 for every spectrum.")
     else:
-        st.caption("Uses fixed observed windows at 1200â€“1300, 1660â€“2500 and 2800â€“2900 cmâ»Â¹ with the same pretrained model.")
+        st.caption("Uses fixed observed windows at 1200-1300, 1660-2500 and 2800-2900 cm^-1 with the same pretrained model.")
     if upload is None:
         return
     import hashlib
@@ -246,19 +246,19 @@ def main():
     except Exception as exc:
         st.error(str(exc))
         return
-    st.write(f"{len(labels)} spectra Â· {len(wave)} points Â· {wave[0]:.1f}â€“{wave[-1]:.1f} cmâ»Â¹")
+    st.write(f"{len(labels)} spectra | {len(wave)} points | {wave[0]:.1f}-{wave[-1]:.1f} cm^-1")
     for start, end in OBSERVED_WINDOWS[mode]:
         if not np.any((wave >= start) & (wave <= end)):
-            st.warning(f"No data are available in the {start}â€“{end} cmâ»Â¹ observed window. Missing data are not extrapolated.")
+            st.warning(f"No data are available in the {start}-{end} cm^-1 observed window. Missing data are not extrapolated.")
         elif wave.min() > start or wave.max() < end:
-            st.warning(f"The {start}â€“{end} cmâ»Â¹ observed window is partially covered by the input. Only available data are used; missing data are not extrapolated.")
+            st.warning(f"The {start}-{end} cm^-1 observed window is partially covered by the input. Only available data are used; missing data are not extrapolated.")
     with st.expander("Preview original spectrum"):
         raw = go.Figure(go.Scatter(x=wave, y=counts[0], name="Original intensity"))
-        raw.update_layout(xaxis_title="Raman shift (cmâ»Â¹)", yaxis_title="Original intensity")
+        raw.update_layout(xaxis_title="Raman shift (cm^-1)", yaxis_title="Original intensity")
         st.plotly_chart(raw, use_container_width=True)
     if st.button("Analyze", type="primary"):
         try:
-            with st.spinner("Preprocessing and reconstructing the SiC backgroundâ€¦"):
+            with st.spinner("Preprocessing and reconstructing the SiC background..."):
                 result = analyze(wave, counts, labels, mode)
                 downloads = exports(result)
             st.session_state.result = result
@@ -280,7 +280,7 @@ def main():
         fig.add_trace(go.Scatter(x=result["wave"], y=y, name=name, line={"color": color}))
     visible = result["visible"][selection]
     shade_context(fig, result["wave"], visible)
-    fig.update_layout(xaxis_title="Raman shift (cmâ»Â¹)", yaxis_title="Normalized intensity", height=520)
+    fig.update_layout(xaxis_title="Raman shift (cm^-1)", yaxis_title="Normalized intensity", height=520)
     st.plotly_chart(fig, use_container_width=True)
     st.caption("Shaded regions indicate the spectral data provided to the model and are identical for all spectra, including the median view. Negative residual values are retained.")
     st.subheader("Residual spectrum")
@@ -288,7 +288,7 @@ def main():
     residual_fig = go.Figure(go.Scatter(x=result["wave"], y=residual, name="Residual", line={"color": "#078a77"}))
     residual_fig.add_hline(y=0, line_dash="dot", line_color="#64748b")
     shade_context(residual_fig, result["wave"], visible)
-    residual_fig.update_layout(xaxis_title="Raman shift (cmâ»Â¹)", yaxis_title="Normalized residual", height=400)
+    residual_fig.update_layout(xaxis_title="Raman shift (cm^-1)", yaxis_title="Normalized residual", height=400)
     st.plotly_chart(residual_fig, use_container_width=True)
     csv_bytes, nc_bytes = st.session_state.downloads
     left, right = st.columns(2)
